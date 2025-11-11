@@ -470,7 +470,8 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
     data = await request.json()
     events = data.get("events", [])
     for ev in events:
-        etype = ev.get("type")
+        print(ev) # デバッグ用ログ
+        etype = ev.get("type") # イベントタイプ
         reply_token = ev.get("replyToken")
         source = ev.get("source", {})
         user_id = source.get("userId")
