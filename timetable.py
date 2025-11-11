@@ -1,6 +1,4 @@
-import re
-from dotenv import load_dotenv
-load_dotenv()
+from dotenv import load_dotenv; load_dotenv()
 import os
 import hmac
 import base64
@@ -12,10 +10,7 @@ from datetime import datetime, timedelta
 
 import requests
 import schedule
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Response
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
 
 try:
@@ -45,18 +40,6 @@ DEFAULT_PERIOD_MAP = {
 }
 
 # ====== ユーティリティ ======
-
-HTTP_TIMEOUT = 5
-def _make_session():
-    s = requests.Session()
-    retry = Retry(total=2, backoff_factor=0.2,
-                  status_forcelist=[429, 500, 502, 503, 504],
-                  allowed_methods=["POST","GET"])
-    s.mount("https://", HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10))
-    s.mount("http://",  HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10))
-    return s
-HTTP = _make_session()
-
 def normalize_day(day_str: str) -> int:
     key = day_str.strip().lower()
     key = {"thu.": "thu", "tue.": "tue"}.get(key, key)
@@ -98,7 +81,7 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model="gpt-4o-mini", t
         "Extract university timetable (possibly Japanese) into normalized JSON. "
         "Use only the schema and output JSON only with no extra text."
     )
-    user = """
+    user = f"""
 以下は大学の時間割テキストです。日本語の「n限」「月〜金」などが含まれます。
 目的: 各授業の「曜日」「開始時刻」「終了時刻」「科目名」を抽出し、統一フォーマットのJSONで出力してください。
 
@@ -110,16 +93,12 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model="gpt-4o-mini", t
 {period_hint}
 
 スキーマ:
-{
+{{
   "timezone": "{timezone}",
   "schedule": [
-    {"day": "Mon", "start": "09:00", "end": "10:30", "course": "科目名", "location": "教室名(任意)"}
+    {{"day": "Mon", "start": "09:00", "end": "10:30", "course": "科目名"}}
   ]
-}
-
-補足:
-- location は任意。本文に「教室」「講義室」「号館/室」「@」「( )」等で示される場合は抽出して入れてください。
-- 例: "解析学 (2号館301)" / "英語 @ 4-302" / "統計 教室: 経済学部棟201"
+}}
 
 時間割テキスト:
 ---
@@ -164,23 +143,21 @@ def verify_signature(body: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected, signature or "")
 
 def line_push_text(to_user_id: str, text: str):
-    token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-    if not token:
-        return
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    if not LINE_TOKEN:
+        raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が未設定です。")
+    headers = {"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"}
     body = {"to": to_user_id, "messages": [{"type": "text", "text": text[:2000]}]}
-    r = HTTP.post(LINE_PUSH_URL, headers=headers, json=body, timeout=HTTP_TIMEOUT)
+    r = requests.post(LINE_PUSH_URL, headers=headers, data=json.dumps(body), timeout=15)
     if r.status_code >= 300:
-        print(f"LINE Push失敗: {r.status_code} {r.text}")
+        raise RuntimeError(f"LINE Push失敗: {r.status_code} {r.text}")
 
 def line_reply_text(reply_token: str, texts):
-    token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-    if not token or not reply_token:
-        return
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    if not LINE_TOKEN:
+        raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が未設定です。")
+    headers = {"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"}
     msgs = [{"type": "text", "text": str(t)[:2000]} for t in (texts if isinstance(texts, list) else [texts])]
     body = {"replyToken": reply_token, "messages": msgs}
-    r = requests.post(LINE_REPLY_URL, headers=headers, json=body, timeout=10)
+    r = requests.post(LINE_REPLY_URL, headers=headers, data=json.dumps(body), timeout=15)
     if r.status_code >= 300:
         print(f"LINE Reply失敗: {r.status_code} {r.text}")
 
@@ -203,10 +180,7 @@ def schedule_jobs_for_user(user_id: str, schedule_data: dict, minutes_before: in
         msg = f"{title}\n開始: {start}（{minutes_before}分前通知）"
         if end:
             msg += f"\n終了: {end}"
-        if entry.get("location"):
-         msg += f"\n教室: {entry['location']}"
         msg += f"\n曜日: {['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][day_idx]}"
-
 
         getattr(schedule.every(), dow_attr).at(notify_hm).tag(f"user:{user_id}").do(
             line_push_text, to_user_id=user_id, text=msg
@@ -216,27 +190,13 @@ def schedule_jobs_for_user(user_id: str, schedule_data: dict, minutes_before: in
 def summarize_schedule(schedule_data: dict, limit: int = 20) -> str:
     rows = []
     for item in schedule_data.get("schedule", [])[:limit]:
-        loc = f" ({item['location']})" if item.get("location") else ""
-        rows.append(f"{item['day']} {item['start']}-{item.get('end','')} {item['course']}{loc}")
+        rows.append(f"{item['day']} {item['start']}-{item.get('end','')} {item['course']}")
     if len(schedule_data.get("schedule", [])) > limit:
         rows.append("…")
     return "\n".join(rows) if rows else "登録件数 0 件"
 
-def split_course_and_location(text: str) -> tuple[str, str | None]:
-    s = text.strip()
-    # 「@」「教室:」「( )」の末尾を教室として抽出
-    m = re.match(r"^(.*?)[\s　]*[@＠]\s*(.+)$", s)
-    if m:
-        return m.group(1).strip(), m.group(2).strip()
-    m = re.match(r"^(.*?)[\s　]*教室[:：]\s*(.+)$", s)
-    if m:
-        return m.group(1).strip(), m.group(2).strip()
-    m = re.match(r"^(.*?)[（(]\s*([^()（）]+)\s*[)）]$", s)
-    if m:
-        return m.group(1).strip(), m.group(2).strip()
-    return s, None
-
 # OpenAIが使えない場合の簡易パーサー（最低限の対応）
+DAY_JA_TO_EN = {"月":"Mon","火":"Tue","水":"Wed","木":"Thu","金":"Fri","土":"Sat","日":"Sun"}
 def parse_timetable_locally(timetable_text: str, timezone="Asia/Tokyo"):
     schedule = []
     tokens = re.split(r"[\n/／、]+", timetable_text)
@@ -244,39 +204,30 @@ def parse_timetable_locally(timetable_text: str, timezone="Asia/Tokyo"):
         s = tok.strip()
         if not s:
             continue
-
-        # 1) 「月: 1限 科目(教室)」
         m = re.match(r"^(月|火|水|木|金|土|日)[曜]?:?\s*(\d)限\s+(.+)$", s)
         if m:
-            dja, period, rest = m.groups()
+            dja, period, course = m.groups()
             en = DAY_JA_TO_EN.get(dja)
             p = DEFAULT_PERIOD_MAP.get(period)
             if en and p:
-                course, loc = split_course_and_location(rest)
-                schedule.append({"day": en, "start": p["start"], "end": p["end"], "course": course, "location": loc})
+                schedule.append({"day": en, "start": p["start"], "end": p["end"], "course": course.strip()})
             continue
-
-        # 2) 「月 09:00-10:30 科目(教室)」
         m = re.match(r"^(月|火|水|木|金|土|日)[曜]?:?\s*([0-2]?\d:[0-5]\d)\s*-\s*([0-2]?\d:[0-5]\d)\s+(.+)$", s)
         if m:
-            dja, start, end, rest = m.groups()
+            dja, start, end, course = m.groups()
             en = DAY_JA_TO_EN.get(dja)
             if en:
                 start = f"{int(start.split(':')[0]):02d}:{start.split(':')[1]}"
                 end   = f"{int(end.split(':')[0]):02d}:{end.split(':')[1]}"
-                course, loc = split_course_and_location(rest)
-                schedule.append({"day": en, "start": start, "end": end, "course": course, "location": loc})
+                schedule.append({"day": en, "start": start, "end": end, "course": course.strip()})
             continue
-
-        # 3) 「Mon 09:00-10:30 Course(教室)」
         m = re.match(r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s*([0-2]?\d:[0-5]\d)\s*-\s*([0-2]?\d:[0-5]\d)\s+(.+)$", s, re.I)
         if m:
-            day, start, end, rest = m.groups()
+            day, start, end, course = m.groups()
             day = day[:1].upper() + day[1:3].lower()
             start = f"{int(start.split(':')[0]):02d}:{start.split(':')[1]}"
             end   = f"{int(end.split(':')[0]):02d}:{end.split(':')[1]}"
-            course, loc = split_course_and_location(rest)
-            schedule.append({"day": day, "start": start, "end": end, "course": course, "location": loc})
+            schedule.append({"day": day, "start": start, "end": end, "course": course.strip()})
             continue
     return {"timezone": timezone, "schedule": schedule}
 
@@ -436,32 +387,20 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
     body = await request.body()
     signature = request.headers.get("x-line-signature")
     if not verify_signature(body, signature):
-        # 署名NGでも即200にしてリトライを防ぎたい場合は 200 を返す設計も可
         raise HTTPException(status_code=403, detail="Invalid signature")
-    
+
     data = await request.json()
     events = data.get("events", [])
-
     for ev in events:
-        background_tasks.add_task(handle_event_async, ev)
-    return Response(status_code=200)
+        etype = ev.get("type")
+        reply_token = ev.get("replyToken")
+        source = ev.get("source", {})
+        user_id = source.get("userId")
 
-@app.head("/callback")
-def callback_head():
-    return Response(status_code=200)
-
- # 即時ACK（最短応答）してから非同期処理で対応
-def handle_event_async(ev: dict):
-    etype = ev.get("type")
-    reply_token = ev.get("replyToken")
-    source = ev.get("source", {})
-    user_id = source.get("userId")
-
-    try:
         if etype == "message" and ev.get("message", {}).get("type") == "text" and user_id:
             text = ev["message"]["text"].strip()
 
-            # まずは即時の短文返信（BG内なのでWebhookはすでに200済）
+            # 通知分設定
             if text.startswith("通知:"):
                 try:
                     minutes_before = int(text.split(":", 1)[1].strip())
@@ -469,28 +408,26 @@ def handle_event_async(ev: dict):
                     st["minutes_before"] = minutes_before
                     st.setdefault("schedule", {})
                     USER_STATE[user_id] = st
-                    if reply_token:
-                        line_reply_text(reply_token, [f"通知 {minutes_before} 分前に設定しました。時間割テキストを送ってください。"])
+                    line_reply_text(reply_token, [f"通知タイミングを {minutes_before} 分前に設定しました。時間割テキストを送ってください。"])
                 except Exception:
-                    if reply_token:
-                        line_reply_text(reply_token, ["通知:10 の形式で指定してください。"])
-                return
+                    line_reply_text(reply_token, ["通知:10 の形式で分数を指定してください。"])
+                continue
 
+            # 修正コマンド
             if text.startswith(("追加:", "削除:", "置換:", "修正:")):
-                if reply_token:
-                    line_reply_text(reply_token, ["修正内容を受け付けました。反映後に最新の時間割を送ります。"])
-                process_correction_async(user_id, text)
-                return
+                line_reply_text(reply_token, ["修正内容を受け付けました。反映後に最新の時間割をお送りします。"])
+                background_tasks.add_task(process_correction_async, user_id, text)
+                continue
 
-            # 新規登録: 返信もPushに寄せて“即時化”
-            if reply_token:
-                line_reply_text(reply_token, ["入力を受けつけました。処理中です。"])
+            # 新規登録: まず即時返信、処理は非同期
             minutes_before = USER_STATE.get(user_id, {}).get("minutes_before", DEFAULT_MINUTES_BEFORE)
-            process_timetable_async(user_id, text, minutes_before)
+            line_reply_text(reply_token, ["入力を受けつけました。しばらくお待ちください。"])
+            background_tasks.add_task(process_timetable_async, user_id, text, minutes_before)
 
         elif etype == "follow" and user_id:
-            line_push_text(user_id, "友だち追加ありがとうございます。時間割を送ってください。例: 月:1限 解析学 / 火:2限 英語")
-    except Exception as e:
-        # BG内例外はログに記録
-        print(f"handle_event_async error: {e}")
+            try:
+                line_push_text(user_id, "友だち追加ありがとうございます。時間割のテキストを送ってください。例: 月:1限 解析学 / 火:2限 英語\n修正は 追加:/削除:/置換: で指定できます。")
+            except Exception as e:
+                print(f"初回メッセージ送信失敗: {e}")
 
+    return {"status": "ok"}
