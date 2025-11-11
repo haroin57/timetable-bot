@@ -1,0 +1,180 @@
+\section*{第1問 式(5.18)から式(5.19)の導出}
+
+ベクトルポテンシャル $\mathbf{A}$ はローレンツ・ゲージのもとで次式に従う：
+\begin{equation}
+(\nabla^2 + k^2)\mathbf{A} = -\mu \mathbf{i}
+\label{eq:518}
+\end{equation}
+
+また，ローレンツ条件より
+\begin{equation}
+\nabla \cdot \mathbf{A} + j\omega\mu\varepsilon V = 0
+\quad\Rightarrow\quad
+\nabla \cdot \mathbf{A} = -j\omega\mu\varepsilon V
+\label{eq:Lorenz}
+\end{equation}
+
+時間調和場（時間依存性 $e^{j\omega t}$）を仮定すると，連続の式は
+\begin{equation}
+\nabla \cdot \mathbf{i} + j\omega \rho = 0
+\quad\Rightarrow\quad
+\nabla \cdot \mathbf{i} = -j\omega \rho
+\label{eq:continuity}
+\end{equation}
+
+式\eqref{eq:518} の両辺に発散をとる：
+\begin{align}
+\nabla \cdot \bigl[(\nabla^2 + k^2)\mathbf{A}\bigr]
+&= -\mu \,\nabla \cdot \mathbf{i}
+\end{align}
+
+ベクトル演算の交換可能性より
+\begin{equation}
+\nabla \cdot (\nabla^2 \mathbf{A}) = \nabla^2 (\nabla \cdot \mathbf{A})
+\end{equation}
+であるから，
+\begin{align}
+\nabla^2 (\nabla \cdot \mathbf{A}) + k^2 (\nabla \cdot \mathbf{A})
+= -\mu \,\nabla \cdot \mathbf{i}
+\label{eq:div_step}
+\end{align}
+
+ここでローレンツ条件 \eqref{eq:Lorenz} を用いると
+\begin{align}
+\nabla^2 (\nabla \cdot \mathbf{A}) + k^2 (\nabla \cdot \mathbf{A})
+&= \nabla^2(-j\omega\mu\varepsilon V) + k^2(-j\omega\mu\varepsilon V) \notag\\
+&= -j\omega\mu\varepsilon(\nabla^2 V + k^2 V)
+\end{align}
+したがって \eqref{eq:div_step} は
+\begin{equation}
+- j\omega\mu\varepsilon(\nabla^2 V + k^2 V)
+= -\mu \,\nabla \cdot \mathbf{i}
+\end{equation}
+両辺を $-\mu$ で割ると
+\begin{equation}
+j\omega\varepsilon(\nabla^2 V + k^2 V) = \nabla \cdot \mathbf{i}
+\end{equation}
+
+さらに連続の式 \eqref{eq:continuity} を代入すると
+\begin{equation}
+j\omega\varepsilon(\nabla^2 V + k^2 V) = -j\omega \rho
+\end{equation}
+両辺を $j\omega$ で割り整理して
+\begin{equation}
+\varepsilon(\nabla^2 V + k^2 V) = -\rho
+\end{equation}
+よって
+\begin{equation}
+(\nabla^2 + k^2)V = -\frac{\rho}{\varepsilon}
+\label{eq:519}
+\end{equation}
+が得られ，式(5.19)が式(5.18)から導かれることが示された。
+
+\newpage
+
+\section*{第2問 （演習問題5.2）式(5.24)の $V$ が式(5.19)を満たすことの証明}
+
+演習5.2では，点電荷からのスカラポテンシャルとして
+\begin{equation}
+V(r) = c_1 \frac{e^{-jkr}}{r}
+\label{eq:524}
+\end{equation}
+という形を仮定し，これがヘルムホルツ方程式
+\begin{equation}
+(\nabla^2 + k^2)V = -\frac{\rho}{\varepsilon}
+\label{eq:Helm}
+\end{equation}
+を満たすことを確かめる（特に電荷分布のない領域での振る舞いを確認する）。
+
+点電荷の位置から離れた領域では $\rho = 0$ であるから，
+式\eqref{eq:Helm} は
+\begin{equation}
+(\nabla^2 + k^2)V = 0
+\label{eq:Helm_free}
+\end{equation}
+となる。この式を，\eqref{eq:524} に対して満たすことを示す。
+
+球対称なスカラ関数 $V(r)$ に対して，ラプラシアンは
+\begin{equation}
+\nabla^2 V
+= \frac{1}{r^2}\frac{d}{dr}\left( r^2 \frac{dV}{dr} \right)
+\label{eq:spherical_lap}
+\end{equation}
+で与えられる。
+
+$V(r) = c_1 e^{-jkr}/r$ を式\eqref{eq:spherical_lap} に代入して計算する。
+
+まず一次微分：
+\begin{align}
+\frac{dV}{dr}
+&= c_1 \frac{d}{dr}\left(\frac{e^{-jkr}}{r}\right) \notag\\
+&= c_1\left(
+      \frac{-jk e^{-jkr}}{r}
+      - \frac{e^{-jkr}}{r^2}
+    \right)
+\end{align}
+
+次に $r^2 \dfrac{dV}{dr}$ を求める：
+\begin{align}
+r^2 \frac{dV}{dr}
+&= c_1 e^{-jkr}(-jk r - 1)
+\end{align}
+
+これを $r$ で微分すると
+\begin{align}
+\frac{d}{dr}\left(r^2 \frac{dV}{dr}\right)
+&= c_1 \frac{d}{dr}\left[ e^{-jkr}(-jk r - 1) \right] \notag\\
+&= c_1\left[
+   (-jk e^{-jkr})(-jk r - 1)
+   + e^{-jkr}(-jk)
+\right]
+\end{align}
+
+括弧内を整理する：
+\begin{align}
+(-jk)(-jk r - 1) - jk
+&= (-jk)(-jk r) + (-jk)(-1) - jk \notag\\
+&= (-1)k^2 r + jk - jk \notag\\
+&= -k^2 r
+\end{align}
+
+よって
+\begin{equation}
+\frac{d}{dr}\left(r^2 \frac{dV}{dr}\right)
+= -c_1 k^2 r e^{-jkr}
+\end{equation}
+
+これを式\eqref{eq:spherical_lap} に代入すると
+\begin{align}
+\nabla^2 V
+&= \frac{1}{r^2}\left( -c_1 k^2 r e^{-jkr} \right) \notag\\
+&= -k^2 c_1 \frac{e^{-jkr}}{r} \notag\\
+&= -k^2 V
+\end{align}
+
+したがって
+\begin{equation}
+(\nabla^2 + k^2)V
+= (-k^2 V) + k^2 V
+= 0
+\end{equation}
+となり，$\rho = 0$ の領域（点電荷の外側）において
+\eqref{eq:524} はヘルムホルツ方程式 \eqref{eq:Helm_free} を満たすことが示された。
+
+さらに，静的極限 $k \to 0$ では
+\begin{equation}
+V(r) \xrightarrow{k \to 0} \frac{c_1}{r}
+\end{equation}
+一方，静電界における点電荷 $q$ のポテンシャルは
+\begin{equation}
+V(r) = \frac{q}{4\pi\varepsilon} \frac{1}{r}
+\end{equation}
+であるから，両者を一致させるため
+\begin{equation}
+c_1 = \frac{q}{4\pi\varepsilon}
+\end{equation}
+となる。従って
+\begin{equation}
+V(r) = \frac{q}{4\pi\varepsilon}\frac{e^{-jkr}}{r}
+\end{equation}
+が得られ，これが式(5.24)に対応し，かつヘルムホルツ方程式(5.19)を正しく満たしていることが確認できる。

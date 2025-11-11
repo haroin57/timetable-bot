@@ -1,6 +1,6 @@
 import re
 from dotenv import load_dotenv
-from matplotlib import text; load_dotenv()
+load_dotenv()
 import os
 import hmac
 import base64
@@ -98,7 +98,7 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model="gpt-4o-mini", t
         "Extract university timetable (possibly Japanese) into normalized JSON. "
         "Use only the schema and output JSON only with no extra text."
     )
-    user = f"""
+    user = """
 以下は大学の時間割テキストです。日本語の「n限」「月〜金」などが含まれます。
 目的: 各授業の「曜日」「開始時刻」「終了時刻」「科目名」を抽出し、統一フォーマットのJSONで出力してください。
 
@@ -175,12 +175,12 @@ def line_push_text(to_user_id: str, text: str):
 
 def line_reply_text(reply_token: str, texts):
     token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-    if not token:
+    if not token or not reply_token:
         return
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    body = {"replyToken": reply_token,
-            "messages": [{"type": "text", "text": str(t)[:2000]} for t in (texts if isinstance(texts, list) else [texts])]}
-    r = HTTP.post(URL_REPLY, headers=headers, json=body, timeout=HTTP_TIMEOUT)
+    msgs = [{"type": "text", "text": str(t)[:2000]} for t in (texts if isinstance(texts, list) else [texts])]
+    body = {"replyToken": reply_token, "messages": msgs}
+    r = requests.post(LINE_REPLY_URL, headers=headers, json=body, timeout=10)
     if r.status_code >= 300:
         print(f"LINE Reply失敗: {r.status_code} {r.text}")
 
