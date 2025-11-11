@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dotenv import load_dotenv; load_dotenv()
 import os
 import hmac
@@ -7,6 +9,7 @@ import json
 import threading
 import time
 from datetime import datetime, timedelta
+import re
 
 import requests
 import schedule
@@ -67,6 +70,62 @@ def extract_json_from_text(text: str) -> str:
         raise ValueError("JSONっぽい部分を検出できませんでした。")
     return text[first:last+1]
 
+LOCATION_HEAD_RE = re.compile(r"^[A-Z]{1,2}\d{1,2}$")
+LOCATION_COMBINED_RE = re.compile(r"^[A-Z]{1,2}\d{1,2}[-－]?\d{2,3}$")
+
+def _looks_like_location_token(token: str, already_has_loc: bool) -> bool:
+    token = token.strip()
+    if not token:
+        return False
+    if "教室" in token or "号館" in token:
+        return True
+    if LOCATION_COMBINED_RE.match(token):
+        return True
+    if LOCATION_HEAD_RE.match(token):
+        return True
+    if already_has_loc and re.match(r"^\d{2,3}$", token):
+        return True
+    return False
+
+def split_course_and_location(course_raw: str) -> tuple[str, str | None]:
+    text = course_raw.strip()
+    if not text:
+        return "", None
+
+    # e.g. "数学 (101教室)" → course + location
+    m = re.search(r"(?:\(|（)([^()（）]*?教室[^()（）]*?)(?:\)|）)\s*$", text)
+    if m:
+        course = text[:m.start()].rstrip(" ／、-－　")
+        return course or text, m.group(1).strip()
+
+    # e.g. "... C3 100", "... W2 101"
+    m = re.search(r"(?:\s|　)(?P<loc>[A-Z]{1,2}\d{1,2}(?:[-－]?\d{2,3}|\s+\d{2,3}))\s*$", text)
+    if m:
+        course = text[:m.start()].rstrip(" ／、-－　")
+        loc = re.sub(r"\s+", " ", m.group("loc")).strip()
+        return course or text, loc
+
+    tokens = re.split(r"\s+", text)
+    loc_tokens: list[str] = []
+    while tokens:
+        last = tokens[-1]
+        if not last:
+            tokens.pop()
+            continue
+        if not loc_tokens and re.match(r"^\d{2,3}$", last) and len(tokens) >= 2 and LOCATION_HEAD_RE.match(tokens[-2]):
+            loc_tokens.insert(0, tokens.pop())
+            continue
+        if _looks_like_location_token(last, bool(loc_tokens)):
+            loc_tokens.insert(0, tokens.pop())
+            continue
+        break
+
+    if loc_tokens:
+        course = " ".join(tokens).rstrip(" ／、-－　")
+        loc = " ".join(loc_tokens).strip()
+        return (course or text).strip(), loc or None
+    return text, None
+
 def call_chatgpt_to_extract_schedule(timetable_text: str, model="gpt-4o-mini", timezone="Asia/Tokyo"):
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -83,12 +142,13 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model="gpt-4o-mini", t
     )
     user = f"""
 以下は大学の時間割テキストです。日本語の「n限」「月〜金」などが含まれます。
-目的: 各授業の「曜日」「開始時刻」「終了時刻」「科目名」を抽出し、統一フォーマットのJSONで出力してください。
+目的: 各授業の「曜日」「開始時刻」「終了時刻」「科目名」「教室」を抽出し、統一フォーマットのJSONで出力してください。
 
 制約:
 - 出力はJSONのみ。前後に説明文やコードブロックは不要。
 - 時刻は24時間表記 "HH:MM"。
 - 曜日は "Mon","Tue","Wed","Thu","Fri","Sat","Sun" のいずれか。
+- locationはテキスト末尾などに記載された教室表記（例: "C3 100", "W2-101", "101教室"）をそのまま入れる。見つからなければ null。
 - 日本語の「n限」は、以下のデフォルト対応を使って開始/終了を決めてください（本文中に別の時間が明記されていればそちらを優先）:
 {period_hint}
 
@@ -96,7 +156,7 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model="gpt-4o-mini", t
 {{
   "timezone": "{timezone}",
   "schedule": [
-    {{"day": "Mon", "start": "09:00", "end": "10:30", "course": "科目名"}}
+    {{"day": "Mon", "start": "09:00", "end": "10:30", "course": "科目名", "location": "C3 100"}}
   ]
 }}
 
@@ -120,6 +180,8 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model="gpt-4o-mini", t
     data = json.loads(raw_json)
     if "schedule" not in data or not isinstance(data["schedule"], list):
         raise ValueError("JSONにschedule配列がありません。")
+    for entry in data["schedule"]:
+        entry.setdefault("location", None)
     return data
 
 
@@ -170,6 +232,7 @@ def schedule_jobs_for_user(user_id: str, schedule_data: dict, minutes_before: in
             start = entry["start"]
             end = entry.get("end")
             course = entry["course"].strip()
+            location = (entry.get("location") or "").strip()
         except Exception as e:
             print(f"スキップ（不正エントリ）: {entry} -> {e}")
             continue
@@ -181,6 +244,7 @@ def schedule_jobs_for_user(user_id: str, schedule_data: dict, minutes_before: in
         if end:
             msg += f"\n終了: {end}"
         msg += f"\n曜日: {['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][day_idx]}"
+        msg += f"\n教室: {location or '未設定'}"
 
         getattr(schedule.every(), dow_attr).at(notify_hm).tag(f"user:{user_id}").do(
             line_push_text, to_user_id=user_id, text=msg
@@ -190,7 +254,9 @@ def schedule_jobs_for_user(user_id: str, schedule_data: dict, minutes_before: in
 def summarize_schedule(schedule_data: dict, limit: int = 20) -> str:
     rows = []
     for item in schedule_data.get("schedule", [])[:limit]:
-        rows.append(f"{item['day']} {item['start']}-{item.get('end','')} {item['course']}")
+        location = item.get("location") or "未設定"
+        end = item.get("end") or ""
+        rows.append(f"{item['day']} {item['start']}-{end} {item['course']} / 教室: {location}")
     if len(schedule_data.get("schedule", [])) > limit:
         rows.append("…")
     return "\n".join(rows) if rows else "登録件数 0 件"
@@ -210,7 +276,8 @@ def parse_timetable_locally(timetable_text: str, timezone="Asia/Tokyo"):
             en = DAY_JA_TO_EN.get(dja)
             p = DEFAULT_PERIOD_MAP.get(period)
             if en and p:
-                schedule.append({"day": en, "start": p["start"], "end": p["end"], "course": course.strip()})
+                course_name, location = split_course_and_location(course)
+                schedule.append({"day": en, "start": p["start"], "end": p["end"], "course": course_name.strip(), "location": location})
             continue
         m = re.match(r"^(月|火|水|木|金|土|日)[曜]?:?\s*([0-2]?\d:[0-5]\d)\s*-\s*([0-2]?\d:[0-5]\d)\s+(.+)$", s)
         if m:
@@ -219,7 +286,8 @@ def parse_timetable_locally(timetable_text: str, timezone="Asia/Tokyo"):
             if en:
                 start = f"{int(start.split(':')[0]):02d}:{start.split(':')[1]}"
                 end   = f"{int(end.split(':')[0]):02d}:{end.split(':')[1]}"
-                schedule.append({"day": en, "start": start, "end": end, "course": course.strip()})
+                course_name, location = split_course_and_location(course)
+                schedule.append({"day": en, "start": start, "end": end, "course": course_name.strip(), "location": location})
             continue
         m = re.match(r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s*([0-2]?\d:[0-5]\d)\s*-\s*([0-2]?\d:[0-5]\d)\s+(.+)$", s, re.I)
         if m:
@@ -227,7 +295,8 @@ def parse_timetable_locally(timetable_text: str, timezone="Asia/Tokyo"):
             day = day[:1].upper() + day[1:3].lower()
             start = f"{int(start.split(':')[0]):02d}:{start.split(':')[1]}"
             end   = f"{int(end.split(':')[0]):02d}:{end.split(':')[1]}"
-            schedule.append({"day": day, "start": start, "end": end, "course": course.strip()})
+            course_name, location = split_course_and_location(course)
+            schedule.append({"day": day, "start": start, "end": end, "course": course_name.strip(), "location": location})
             continue
     return {"timezone": timezone, "schedule": schedule}
 
@@ -237,7 +306,13 @@ def merge_additions(base: dict, additions: dict) -> dict:
     for e in additions.get("schedule", []):
         k = (e["day"], e["start"], e["course"].strip())
         if k not in keyset:
-            out.append({"day": e["day"], "start": e["start"], "end": e.get("end"), "course": e["course"].strip()})
+            out.append({
+                "day": e["day"],
+                "start": e["start"],
+                "end": e.get("end"),
+                "course": e["course"].strip(),
+                "location": e.get("location"),
+            })
             keyset.add(k)
     return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": out}
 
@@ -259,7 +334,9 @@ def delete_by_filter(base: dict, filt_text: str) -> dict:
             d = DAY_JA_TO_EN.get(d, d.title()[:3])
             hm = f"{int(hm.split(':')[0]):02d}:{hm.split(':')[1]}"
             return e["day"] == d and e["start"] == hm
-        return filt in e["course"]
+        if "教室" in filt and e.get("location"):
+            return filt in e["location"]
+        return filt in e["course"] or (e.get("location") and filt in e["location"])
     new = [e for e in base.get("schedule", []) if not match(e)]
     return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new}
 
