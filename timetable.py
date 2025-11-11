@@ -361,6 +361,7 @@ def process_timetable_async(user_id: str, text: str, minutes_before: int):
             return
         else:
             line_push_text(user_id, "OpenAIが利用できないため、簡易解析で登録します。")
+    print(f"user_id={user_id}")
 
     # 2) スケジュール登録
     schedule_jobs_for_user(user_id, schedule_data, minutes_before=minutes_before)
