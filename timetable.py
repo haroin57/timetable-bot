@@ -505,7 +505,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
 
         elif etype == "follow" and user_id:
             try:
-                line_push_text(user_id, "友だち追加ありがとうございます。時間割のテキストを送ってください。例: 月:1限 解析学 / 火:2限 英語\n修正は 追加:/削除:/置換: で指定できます。")
+                line_push_text(user_id, "友だち追加ありがとうございます。時間割のテキストを送ってください。時間割のテキストはかなり適当でも拾うようになっているので適当で大丈夫です。例: 月:1限 解析学 / 火:2限 英語\n修正は 追加:/削除:/置換: で指定できます。")
             except Exception as e:
                 print(f"初回メッセージ送信失敗: {e}")
 
