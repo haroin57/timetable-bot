@@ -265,15 +265,15 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_M
         ],
     )
     content = resp.choices[0].message.content
-    raw_json = extract_json_from_text(content)
-    data = normalize_schedule_response(json.loads(raw_json), timezone=timezone)
-    print(f"Extracted schedule: {data}") # Debug log
-    for entry in data["schedule"]:
-        entry.setdefault("location", None)
-    return data
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(part.get("text", ""))
+        content = "\n".join(parts)
+    if not isinstance(content, str):
+        raise ValueError(f"Unexpected content type: {type(content)}")
 
-def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: str = "image/png",
-                                                model=DEFAULT_VISION_MODEL, timezone="Asia/Tokyo"):
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY が未設定です。")
@@ -315,14 +315,12 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
         ],
     )
     content = resp.choices[0].message.content
-    print(f"Raw response content: {content}") # Debug log
-    # text パートだけを連結
+    if isinstance(content, list):
         parts = []
         for part in content:
             if isinstance(part, dict) and part.get("type") == "text":
                 parts.append(part.get("text", ""))
         content = "\n".join(parts)
-
     if not isinstance(content, str):
         raise ValueError(f"Unexpected content type: {type(content)}")
     raw_json = extract_json_from_text(content)
