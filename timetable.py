@@ -51,6 +51,7 @@ VIEW_COMMANDS = {"一覧", "確認", "時間割", "schedule", "list"}
 HELP_COMMANDS = {"help", "ヘルプ", "使い方"}
 
 RESET_COMMANDS = {"リセット", "reset", "クリア", "clear"}
+LOCATION_COMMANDS = {"教室", "場所", "location", "room"}
 
 
 
@@ -69,6 +70,8 @@ HELP_TEXT = (
     "・リセット … 登録済みの時間割をすべて削除\n"
 
     "・一覧 … 現在登録済みの時間割を表示\n"
+
+    "・教室 月 10:30 -> W2-101 … 条件に合う授業の教室をまとめて設定\n"
 
     "そのほか時間割テキスト／画像を送信すると解析して登録します。"
 
@@ -592,29 +595,54 @@ def merge_additions(base: dict, additions: dict) -> dict:
             keyset.add(k)
     return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": out}
 
-def delete_by_filter(base: dict, filt_text: str) -> dict:
-    filt = filt_text.strip()
-    def match(e):
-        # day+period or day+start or course substring
-        if "限" in filt:
-            m = re.search(r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun|月|火|水|木|金|土|日).{0,2}(\d)限", filt, re.I)
-            if m:
-                d, p = m.groups()
-                d = DAY_JA_TO_EN.get(d, d.title()[:3])
-                want = DEFAULT_PERIOD_MAP.get(p)
-                if want:
-                    return e["day"] == d and e["start"] == want["start"]
-        m = re.search(r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun|月|火|水|木|金|土|日).{0,2}([0-2]?\d:[0-5]\d)", filt, re.I)
+def entry_matches_filter(entry: dict, filt_text: str) -> bool:
+    filt = (filt_text or "").strip()
+    if not filt:
+        return False
+    if "限" in filt:
+        m = re.search(r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun|月|火|水|木|金|土|日).{0,2}(\d)限", filt, re.I)
         if m:
-            d, hm = m.groups()
+            d, p = m.groups()
             d = DAY_JA_TO_EN.get(d, d.title()[:3])
-            hm = f"{int(hm.split(':')[0]):02d}:{hm.split(':')[1]}"
-            return e["day"] == d and e["start"] == hm
-        if "教室" in filt and e.get("location"):
-            return filt in e["location"]
-        return filt in e["course"] or (e.get("location") and filt in e["location"])
-    new = [e for e in base.get("schedule", []) if not match(e)]
+            want = DEFAULT_PERIOD_MAP.get(p)
+            if want:
+                return entry["day"] == d and entry["start"] == want["start"]
+    m = re.search(r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun|月|火|水|木|金|土|日).{0,2}([0-2]?\d:[0-5]\d)", filt, re.I)
+    if m:
+        d, hm = m.groups()
+        d = DAY_JA_TO_EN.get(d, d.title()[:3])
+        hm = f"{int(hm.split(':')[0]):02d}:{hm.split(':')[1]}"
+        return entry["day"] == d and entry["start"] == hm
+    if "教室" in filt and entry.get("location"):
+        return filt in entry["location"]
+    return filt in entry["course"] or (entry.get("location") and filt in entry["location"])
+
+
+def delete_by_filter(base: dict, filt_text: str) -> dict:
+    filt = (filt_text or "").strip()
+    new = [e for e in base.get("schedule", []) if not entry_matches_filter(e, filt)]
     return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new}
+
+
+def update_locations_by_filter(base: dict, filt_text: str, location_text: str) -> tuple[dict, int]:
+    filt = (filt_text or "").strip()
+    location = (location_text or "").strip()
+    if not filt:
+        raise ValueError("教室を更新する対象が指定されていません。")
+    if not location:
+        raise ValueError("設定する教室名が空です。")
+
+    updated = 0
+    new_list = []
+    for e in base.get("schedule", []):
+        if entry_matches_filter(e, filt):
+            ne = dict(e)
+            ne["location"] = location
+            new_list.append(ne)
+            updated += 1
+        else:
+            new_list.append(e)
+    return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_list}, updated
 
 def summarize_and_push(user_id: str, minutes_before: int, schedule_data: dict, prefix: str):
     msg = f"{prefix}\n通知: {minutes_before}分前\n" + summarize_schedule(schedule_data)
@@ -673,8 +701,14 @@ def process_image_timetable_async(user_id: str, message_id: str, minutes_before:
         err = e
 
     if not schedule_data or not schedule_data.get("schedule"):
-        line_push_text(user_id, f"画像から時間割を抽出できませんでした。{err or ''}".strip())
-        print(f"[image-error] user={user_id} err={err}")
+        detail = str(err).strip() if err else "OpenAIの応答から授業が見つかりませんでした。"
+        message = f"画像から時間割を抽出できませんでした。{detail}".strip()
+        line_push_text(user_id, message)
+        try:
+            raw_preview = json.dumps(schedule_data, ensure_ascii=False)[:500] if schedule_data else "None"
+        except Exception:
+            raw_preview = str(schedule_data)
+        print(f"[image-error] user={user_id} detail={detail} raw={raw_preview}")
         return
 
     schedule_jobs_for_user(user_id, schedule_data, minutes_before=minutes_before)
@@ -863,6 +897,46 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                         line_reply_text(reply_token, ["通知 10 の形式で分数を指定してください。"])
                     continue
 
+                location_payload = None
+                for keyword in LOCATION_COMMANDS:
+                    payload = extract_command_payload(text, keyword)
+                    if payload is not None:
+                        location_payload = payload
+                        break
+                if location_payload is not None:
+                    body = location_payload.strip()
+                    if not body:
+                        line_reply_text(reply_token, ["教室 月 10:30 -> W2-101 のように対象と教室名を指定してください。"])
+                        continue
+                    parts = parse_replacement_parts(body)
+                    if not parts:
+                        line_reply_text(reply_token, ["教室 コマンドは「教室 条件 -> 教室名」の形式で入力してください。"])
+                        continue
+                    target_text, location_text = parts
+                    target_text = target_text.strip()
+                    location_text = location_text.strip()
+                    state = USER_STATE.get(user_id)
+                    if not state or not state.get("schedule") or not state["schedule"].get("schedule"):
+                        line_reply_text(reply_token, ["まず時間割を登録してから教室を設定してください。"])
+                        continue
+                    minutes_before = state.get("minutes_before", DEFAULT_MINUTES_BEFORE)
+                    try:
+                        new_sched, updated = update_locations_by_filter(state["schedule"], target_text, location_text)
+                    except ValueError as e:
+                        line_reply_text(reply_token, [str(e)])
+                        continue
+                    if not updated:
+                        line_reply_text(reply_token, ["条件に一致する授業が見つかりませんでした。例: 教室 月 10:30 -> W2-101"])
+                        continue
+                    schedule_jobs_for_user(user_id, new_sched, minutes_before=minutes_before)
+                    st = ensure_user_state(user_id)
+                    st["minutes_before"] = minutes_before
+                    st["schedule"] = ensure_schedule_dict(new_sched)
+                    st["updated_at"] = datetime.now()
+                    persist_user_state(user_id)
+                    line_reply_text(reply_token, [f"{updated}件の授業に教室「{location_text}」を設定しました。"])
+                    continue
+
                 add_payload = extract_command_payload(text, "追加")
                 if add_payload is not None:
                     if not add_payload:
@@ -923,4 +997,5 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                 print(f"初回メッセージ送信失敗: {e}")
 
     return {"status": "ok"}
+
 
