@@ -67,7 +67,7 @@ HELP_TEXT = (
 
     "・一覧 … 現在登録済みの時間割を表示\n"
 
-    "そのほか時間割テキストを送信すると解析して登録します。"
+    "そのほか時間割テキスト／画像を送信すると解析して登録します。"
 
 )
 
@@ -251,6 +251,50 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model="gpt-4o-mini", t
         entry.setdefault("location", None)
     return data
 
+def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: str = "image/png",
+                                                model="gpt-4o-mini", timezone="Asia/Tokyo"):
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY が未設定です。")
+    if OpenAI is None:
+        raise RuntimeError("openai ライブラリが見つかりません。pip install openai を実行してください。")
+
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:{mime_type};base64,{b64}"
+    system = (
+        "You are a strict JSON extractor. "
+        "Read timetable screenshots (possibly Japanese) and output normalized JSON. "
+        "Use only the schema and output JSON only with no extra text."
+    )
+    user_text = (
+        f"画像内の大学時間割を読み取り、曜日/開始/終了/科目/教室を抽出してJSONで返してください。"
+        f"タイムゾーンは {timezone}。"
+    )
+
+    client = OpenAI()
+    resp = client.chat.completions.create(
+        model=model,
+        temperature=0,
+        messages=[
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_text},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            },
+        ],
+    )
+    content = resp.choices[0].message.content
+    raw_json = extract_json_from_text(content)
+    data = json.loads(raw_json)
+    if "schedule" not in data or not isinstance(data["schedule"], list):
+        raise ValueError("JSONにschedule配列がありません。")
+    for entry in data["schedule"]:
+        entry.setdefault("location", None)
+    return data
+
 
 
 
@@ -260,6 +304,7 @@ LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
+LINE_CONTENT_URL = "https://api-data.line.me/v2/bot/message/{message_id}/content"
 
 # ユーザーごとの状態保持（簡易版: メモリ）
 USER_STATE = {}  # user_id -> {"minutes_before": int, "schedule": dict, "updated_at": datetime}
@@ -310,6 +355,17 @@ def line_reply_text(reply_token: str, texts):
     r = requests.post(LINE_REPLY_URL, headers=headers, data=json.dumps(body), timeout=15)
     if r.status_code >= 300:
         print(f"LINE Reply失敗: {r.status_code} {r.text}")
+
+def download_line_content(message_id: str) -> tuple[bytes, str]:
+    if not LINE_TOKEN:
+        raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が未設定です。")
+    url = LINE_CONTENT_URL.format(message_id=message_id)
+    headers = {"Authorization": f"Bearer {LINE_TOKEN}"}
+    r = requests.get(url, headers=headers, timeout=30)
+    if r.status_code >= 300:
+        raise RuntimeError(f"LINE Content取得失敗: {r.status_code} {r.text}")
+    mime = r.headers.get("Content-Type", "application/octet-stream")
+    return r.content, mime
 
 # 既存のschedule_jobs_for_userがなければ以下の関数で差し替え
 def schedule_jobs_for_user(user_id: str, schedule_data: dict, minutes_before: int = DEFAULT_MINUTES_BEFORE):
@@ -543,6 +599,37 @@ def process_timetable_async(user_id: str, text: str, minutes_before: int):
     # 4) 完了通知 + 内訳
     summarize_and_push(user_id, minutes_before, schedule_data, "時間割の登録が完了しました。内訳は以下です。誤りがあれば「追加」「削除」「置換」で修正できます。")
 
+def process_image_timetable_async(user_id: str, message_id: str, minutes_before: int):
+    try:
+        image_bytes, mime_type = download_line_content(message_id)
+    except Exception as e:
+        line_push_text(user_id, f"画像のダウンロードに失敗しました: {e}")
+        return
+
+    schedule_data = None
+    err = None
+    try:
+        schedule_data = call_chatgpt_to_extract_schedule_from_image(
+            image_bytes,
+            mime_type=mime_type,
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            timezone="Asia/Tokyo",
+        )
+    except Exception as e:
+        err = e
+
+    if not schedule_data or not schedule_data.get("schedule"):
+        line_push_text(user_id, f"画像から時間割を抽出できませんでした。{err or ''}".strip())
+        return
+
+    schedule_jobs_for_user(user_id, schedule_data, minutes_before=minutes_before)
+    state = ensure_user_state(user_id)
+    state["minutes_before"] = minutes_before
+    state["schedule"] = ensure_schedule_dict(schedule_data)
+    state["updated_at"] = datetime.now()
+    persist_user_state(user_id)
+    summarize_and_push(user_id, minutes_before, schedule_data, "画像から時間割を登録しました。内訳は以下です。")
+
 def process_correction_async(user_id: str, text: str):
     state = USER_STATE.get(user_id)
     if not state or not state.get("schedule"):
@@ -673,86 +760,107 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
         source = ev.get("source", {})
         user_id = source.get("userId")
 
-        if etype == "message" and ev.get("message", {}).get("type") == "text" and user_id:
-            text = ev["message"]["text"].strip()
+        if etype == "message" and user_id:
+            message = ev.get("message", {})
+            msg_type = message.get("type")
 
-            if text in HELP_COMMANDS:
-                line_reply_text(reply_token, [HELP_TEXT])
-                continue
+            if msg_type == "text":
+                text = message.get("text", "").strip()
 
-            if text in VIEW_COMMANDS:
-                state = USER_STATE.get(user_id)
-                if not state or not state.get("schedule") or not state["schedule"].get("schedule"):
-                    line_reply_text(reply_token, ["まだ時間割が登録されていません。先に時間割を送信してください。"])
-                else:
-                    minutes_before = state.get("minutes_before", DEFAULT_MINUTES_BEFORE)
-                    summary = summarize_schedule(state["schedule"])
-                    line_reply_text(reply_token, [f"現在登録されている時間割です。\n通知: {minutes_before}分前\n{summary}"])
-                continue
-
-            if text in RESET_COMMANDS:
-                state = USER_STATE.get(user_id)
-                if not state or not state.get("schedule") or not state["schedule"].get("schedule"):
-                    line_reply_text(reply_token, ["まだ時間割が登録されていません。"])
-                else:
-                    reset_user_schedule(user_id)
-                    line_reply_text(reply_token, ["登録済みの時間割をリセットしました。新しい時間割を送信してください。"])
-                continue
-
-            # 通知分設定
-            notify_payload = extract_command_payload(text, "通知")
-            if notify_payload is not None:
-                if not notify_payload:
-                    line_reply_text(reply_token, ["通知 10 のように分数を続けて入力してください。"])
+                if text in HELP_COMMANDS:
+                    line_reply_text(reply_token, [HELP_TEXT])
                     continue
-                try:
-                    minutes_before = int(notify_payload.strip())
-                    st = ensure_user_state(user_id)
-                    st["minutes_before"] = minutes_before
-                    persist_user_state(user_id)
-                    sched = st.get("schedule") or {}
-                    if sched.get("schedule"):
-                        schedule_jobs_for_user(user_id, sched, minutes_before=minutes_before)
-                    line_reply_text(reply_token, [f"通知タイミングを {minutes_before} 分前に設定しました。時間割テキストを送ってください。"])
-                except Exception:
-                    line_reply_text(reply_token, ["通知 10 の形式で分数を指定してください。"])
-                continue
 
-            # 修正コマンド
-            add_payload = extract_command_payload(text, "追加")
-            if add_payload is not None:
-                if not add_payload:
-                    line_reply_text(reply_token, ["追加 月 10:40-12:10 英語 のように入力してください。"])
+                if text in VIEW_COMMANDS:
+                    state = USER_STATE.get(user_id)
+                    if not state or not state.get("schedule") or not state["schedule"].get("schedule"):
+                        line_reply_text(reply_token, ["まだ時間割が登録されていません。先に時間割を送信してください。"])
+                    else:
+                        minutes_before = state.get("minutes_before", DEFAULT_MINUTES_BEFORE)
+                        summary = summarize_schedule(state["schedule"])
+                        line_reply_text(reply_token, [f"現在登録されている時間割です。\n通知: {minutes_before}分前\n{summary}"])
                     continue
-                line_reply_text(reply_token, ["修正内容を受け付けました。反映後に最新の時間割をお送りします。"])
-                background_tasks.add_task(process_correction_async, user_id, f"追加:{add_payload}")
-                continue
 
-            delete_payload = extract_command_payload(text, "削除")
-            if delete_payload is not None:
-                if not delete_payload:
-                    line_reply_text(reply_token, ["削除 月 1限 解析学 のように入力してください。"])
+                if text in RESET_COMMANDS:
+                    state = USER_STATE.get(user_id)
+                    if not state or not state.get("schedule") or not state["schedule"].get("schedule"):
+                        line_reply_text(reply_token, ["まだ時間割が登録されていません。"])
+                    else:
+                        reset_user_schedule(user_id)
+                        line_reply_text(reply_token, ["登録済みの時間割をリセットしました。新しい時間割を送信してください。"])
                     continue
-                line_reply_text(reply_token, ["修正内容を受け付けました。反映後に最新の時間割をお送りします。"])
-                background_tasks.add_task(process_correction_async, user_id, f"削除:{delete_payload}")
-                continue
 
-            replace_payload = extract_command_payload(text, "置換")
-            if replace_payload is None:
-                replace_payload = extract_command_payload(text, "修正")
-            if replace_payload is not None:
-                if not replace_payload:
-                    line_reply_text(reply_token, ["置換 コマンドは 1行目=変更前, 2行目以降=変更後 の形式で入力してください。"])
+                notify_payload = extract_command_payload(text, "通知")
+                if notify_payload is not None:
+                    if not notify_payload:
+                        line_reply_text(reply_token, ["通知 10 のように分数を続けて入力してください。"])
+                        continue
+                    try:
+                        minutes_before = int(notify_payload.strip())
+                        st = ensure_user_state(user_id)
+                        st["minutes_before"] = minutes_before
+                        persist_user_state(user_id)
+                        sched = st.get("schedule") or {}
+                        if sched.get("schedule"):
+                            schedule_jobs_for_user(user_id, sched, minutes_before=minutes_before)
+                        line_reply_text(reply_token, [f"通知タイミングを {minutes_before} 分前に設定しました。時間割テキストを送ってください。"])
+                    except Exception:
+                        line_reply_text(reply_token, ["通知 10 の形式で分数を指定してください。"])
                     continue
-                line_reply_text(reply_token, ["修正内容を受け付けました。反映後に最新の時間割をお送りします。"])
-                background_tasks.add_task(process_correction_async, user_id, f"置換:{replace_payload}")
+
+                add_payload = extract_command_payload(text, "追加")
+                if add_payload is not None:
+                    if not add_payload:
+                        line_reply_text(reply_token, ["追加 月 10:40-12:10 英語 のように入力してください。"])
+                        continue
+                    line_reply_text(reply_token, ["修正内容を受け付けました。反映後に最新の時間割をお送りします。"])
+                    background_tasks.add_task(process_correction_async, user_id, f"追加:{add_payload}")
+                    continue
+
+                delete_payload = extract_command_payload(text, "削除")
+                if delete_payload is not None:
+                    if not delete_payload:
+                        line_reply_text(reply_token, ["削除 月 1限 解析学 のように入力してください。"])
+                        continue
+                    line_reply_text(reply_token, ["修正内容を受け付けました。反映後に最新の時間割をお送りします。"])
+                    background_tasks.add_task(process_correction_async, user_id, f"削除:{delete_payload}")
+                    continue
+
+                replace_payload = extract_command_payload(text, "置換")
+                if replace_payload is None:
+                    replace_payload = extract_command_payload(text, "修正")
+                if replace_payload is not None:
+                    if not replace_payload:
+                        line_reply_text(reply_token, ["置換 コマンドは 1行目=変更前, 2行目以降=変更後 の形式で入力してください。"])
+                        continue
+                    line_reply_text(reply_token, ["修正内容を受け付けました。反映後に最新の時間割をお送りします。"])
+                    background_tasks.add_task(process_correction_async, user_id, f"置換:{replace_payload}")
+                    continue
+
+                if is_view_command(text):
+                    state = USER_STATE.get(user_id)
+                    if not state.get("schedule"):
+                        line_reply_text(reply_token, ["まだ時間割が登録されていません。先に時間割を送信してください。"])
+                    else:
+                        minutes_before = state.get("minutes_before", DEFAULT_MINUTES_BEFORE)
+                        summary = summarize_schedule(state["schedule"])
+                        line_reply_text(reply_token, [f"現在登録されている時間割です。\n通知: {minutes_before}分前\n{summary}"])
+                    continue
+
+                minutes_before = ensure_user_state(user_id).get("minutes_before", DEFAULT_MINUTES_BEFORE)
+                line_reply_text(reply_token, ["入力を受けつけました。しばらくお待ちください。"])
+                background_tasks.add_task(process_timetable_async, user_id, text, minutes_before)
                 continue
 
-            # 新規登録: まず即時返信、処理は非同期
-            minutes_before = ensure_user_state(user_id).get("minutes_before", DEFAULT_MINUTES_BEFORE)
-            line_reply_text(reply_token, ["入力を受けつけました。しばらくお待ちください。"])
-            background_tasks.add_task(process_timetable_async, user_id, text, minutes_before)
-
+            if msg_type == "image":
+                message_id = message.get("id")
+                if not message_id:
+                    line_reply_text(reply_token, ["画像IDを取得できませんでした。"])
+                    continue
+                minutes_before = ensure_user_state(user_id).get("minutes_before", DEFAULT_MINUTES_BEFORE)
+                line_reply_text(reply_token, ["画像を受け付けました。解析後に時間割をお送りします。"])
+                background_tasks.add_task(process_image_timetable_async, user_id, message_id, minutes_before)
+                continue
         elif etype == "follow" and user_id:
             try:
                 line_push_text(user_id, "友だち追加ありがとうございます。時間割のテキストを送ってください。時間割のテキストはかなり適当でも拾うようになっているので適当で大丈夫です。例: 月:1限 解析学 / 火:2限 英語\n修正は 追加 / 削除 / 置換 で指定できます。")
@@ -760,3 +868,4 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                 print(f"初回メッセージ送信失敗: {e}")
 
     return {"status": "ok"}
+
