@@ -22,6 +22,29 @@ try:
 except ImportError:
     OpenAI = None
 
+def log_openai_response(label: str, resp):
+    try:
+        resp_id = getattr(resp, "id", None)
+        model = getattr(resp, "model", None)
+        usage = getattr(resp, "usage", None)
+        if hasattr(usage, "model_dump"):
+            usage_dict = usage.model_dump()
+        else:
+            usage_dict = usage
+        choice = resp.choices[0] if getattr(resp, "choices", None) else None
+        finish_reason = getattr(choice, "finish_reason", None) if choice else None
+        message = getattr(choice, "message", None) if choice else None
+        content = getattr(message, "content", None) if message else None
+        role = getattr(message, "role", None) if message else None
+    except Exception as log_exc:
+        print(f"[OpenAI {label} log failure] {log_exc}", flush=True)
+        return
+    print(f"[OpenAI {label}] id={resp_id} model={model} finish={finish_reason} usage={usage_dict}", flush=True)
+    if role is not None:
+        print(f"[OpenAI {label} role] {role}", flush=True)
+    if content is not None:
+        print(f"[OpenAI {label} content] {content}", flush=True)
+
 # ====== 設定 ======
 DEFAULT_MINUTES_BEFORE = int(os.getenv("DEFAULT_MINUTES_BEFORE", "10"))
 
@@ -494,8 +517,8 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_M
             {"role": "user", "content": user},
         ],
     )
+    log_openai_response("schedule", resp)
     content = resp.choices[0].message.content
-    print("[OpenAI schedule response]", content, flush=True)
     if isinstance(content, list):
         parts = []
         for part in content:
@@ -566,6 +589,7 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
             },
         ],
     )
+    log_openai_response("vision", resp)
     content = resp.choices[0].message.content
 
     print("[vision raw content]", content, flush=True)  # Debug log
@@ -635,8 +659,8 @@ def call_chatgpt_to_extract_replacement(text: str, model=DEFAULT_OPENAI_MODEL, t
             {"role": "user", "content": user},
         ],
     )
+    log_openai_response("replacement", resp)
     content = resp.choices[0].message.content
-    print("[OpenAI replace response]", content, flush=True)
     if isinstance(content, list):
         content = "\n".join(part.get("text", "") for part in content if isinstance(part, dict))
     raw_json = extract_json_from_text(content)
@@ -688,8 +712,8 @@ def call_chatgpt_to_extract_location_updates(text: str, model=DEFAULT_OPENAI_MOD
             {"role": "user", "content": user},
         ],
     )
+    log_openai_response("location", resp)
     content = resp.choices[0].message.content
-    print("[OpenAI location response]", content, flush=True)
     if isinstance(content, list):
         content = "\n".join(part.get("text", "") for part in content if isinstance(part, dict))
     raw_json = extract_json_from_text(content)
