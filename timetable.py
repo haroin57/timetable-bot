@@ -279,15 +279,50 @@ def entry_matches_pattern(entry: dict, pattern: dict) -> bool:
     return True
 
 
+def _course_match(existing: dict, pattern: dict) -> bool:
+    course = (pattern.get("course") or "").strip().lower()
+    if not course:
+        return False
+    existing_course = (existing.get("course") or "").lower()
+    return course in existing_course
+
+
 def delete_entries_by_patterns(base: dict, patterns: list[dict]) -> tuple[dict, int]:
+    targets = [dict(p, _matched=False) for p in patterns if p]
     removed = 0
-    new_list = []
+    remaining = []
+
     for entry in base.get("schedule", []):
-        if any(entry_matches_pattern(entry, p) for p in patterns):
-            removed += 1
-        else:
-            new_list.append(entry)
-    return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_list}, removed
+        matched = False
+        for target in targets:
+            if target["_matched"]:
+                continue
+            if entry_matches_pattern(entry, target):
+                target["_matched"] = True
+                matched = True
+                removed += 1
+                break
+        if not matched:
+            remaining.append(entry)
+
+    if removed == len(targets) or not targets:
+        return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": remaining}, removed
+
+    new_remaining = []
+    for entry in remaining:
+        matched = False
+        for target in targets:
+            if target["_matched"]:
+                continue
+            if _course_match(entry, target):
+                target["_matched"] = True
+                matched = True
+                removed += 1
+                break
+        if not matched:
+            new_remaining.append(entry)
+
+    return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_remaining}, removed
 
 
 def replace_entry_with_pattern(base: dict, old_pattern: dict, new_entry: dict) -> tuple[dict, bool]:
@@ -306,22 +341,69 @@ def replace_entry_with_pattern(base: dict, old_pattern: dict, new_entry: dict) -
             replaced = True
         else:
             new_list.append(entry)
-    return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_list}, replaced
+
+    if replaced:
+        return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_list}, True
+
+    for idx, entry in enumerate(new_list):
+        if _course_match(entry, old_pattern):
+            new_list[idx] = {
+                "day": new_entry.get("day", entry.get("day")),
+                "start": new_entry.get("start", entry.get("start")),
+                "end": new_entry.get("end") or entry.get("end"),
+                "course": new_entry.get("course", entry.get("course")),
+                "location": new_entry.get("location") if new_entry.get("location") is not None else entry.get("location"),
+            }
+            return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_list}, True
+
+    return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_list}, False
 
 
 def update_locations_with_entries(base: dict, entries: list[dict]) -> tuple[dict, int]:
+    targets = []
+    for entry in entries:
+        loc = (entry.get("location") or "").strip()
+        if not loc:
+            continue
+        target = dict(entry)
+        target["_matched"] = False
+        target["location"] = loc
+        targets.append(target)
+
+    if not targets:
+        return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": base.get("schedule", [])}, 0
+
     updated = 0
     new_list = []
-    for existing in base.get("schedule", []):
+    schedule_list = base.get("schedule", [])
+
+    # First pass: strict matching by day/time/course/location pattern.
+    for existing in schedule_list:
         updated_entry = dict(existing)
-        for target in entries:
+        for target in targets:
+            if target["_matched"]:
+                continue
             if entry_matches_pattern(existing, target):
-                new_loc = (target.get("location") or "").strip()
-                if new_loc:
-                    updated_entry["location"] = new_loc
-                    updated += 1
+                updated_entry["location"] = target["location"]
+                target["_matched"] = True
+                updated += 1
                 break
         new_list.append(updated_entry)
+
+    if updated == len(targets):
+        return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_list}, updated
+
+    for idx, existing in enumerate(new_list):
+        for target in targets:
+            if target["_matched"]:
+                continue
+            if _course_match(existing, target):
+                new_list[idx] = dict(existing)
+                new_list[idx]["location"] = target["location"]
+                target["_matched"] = True
+                updated += 1
+                break
+
     return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_list}, updated
 
 
@@ -1277,7 +1359,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                 continue
         elif etype == "follow" and user_id:
             try:
-                line_push_text(user_id, "友だち追加ありがとうございます。時間割のテキストを送ってください。時間割のテキストはかなり適当でも拾うようになっているので適当で大丈夫です。例: 月:1限 解析学 / 火:2限 英語\n修正は 追加 / 削除 / 置換 で指定できます。")
+                line_push_text(user_id, "友だち追加ありがとうございます。時間割のテキストまたは画像を送ってください。時間割のテキストはかなり適当でも拾うようになっているので適当で大丈夫です。例: 月1限 解析学 / 火2限 英語\n修正は 追加 / 削除 / 置換 で指定できます。")
             except Exception as e:
                 print(f"初回メッセージ送信失敗: {e}")
 
