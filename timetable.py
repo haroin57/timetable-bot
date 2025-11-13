@@ -191,6 +191,24 @@ def split_course_and_location(course_raw: str) -> tuple[str, str | None]:
         return (course or text).strip(), loc or None
     return text, None
 
+COURSE_CODE_RE = re.compile(r"^[A-Z]\d{5,}$")
+
+def is_probably_course_code(token: str) -> bool:
+    token = (token or "").strip()
+    return bool(token and COURSE_CODE_RE.match(token))
+
+def sanitize_entry_fields(entry: dict):
+    course_raw = (entry.get("course") or "").strip()
+    location_raw = (entry.get("location") or "").strip()
+    course_clean, loc_hint = split_course_and_location(course_raw)
+    if loc_hint and not location_raw:
+        location_raw = loc_hint
+    course_clean = re.sub(r"\([^()]*\)$", "", course_clean).strip() or course_clean
+    if location_raw and is_probably_course_code(location_raw):
+        location_raw = None
+    entry["course"] = course_clean or course_raw
+    entry["location"] = location_raw or None
+
 def extract_command_payload(text: str, keyword: str) -> str | None:
     stripped = text.strip()
     if not stripped.startswith(keyword):
@@ -256,6 +274,7 @@ def parse_entries_with_gpt(text: str, timezone: str = "Asia/Tokyo") -> dict:
             raise ValueError(f"解析に失敗しました。{err or ''}".strip())
     for entry in schedule_data.get("schedule", []):
         entry.setdefault("location", None)
+        sanitize_entry_fields(entry)
     return schedule_data
 
 
@@ -467,8 +486,8 @@ Guidelines:
 - Day must be Mon/Tue/Wed/Thu/Fri/Sat/Sun.
 - If the text shows "n限", map it using:
 {period_hint}
-- Use location strings as-is; if missing, output null.
-- 長い授業コード（明らかに教室名でないようなもの）は location にしないでください。
+- The course field must contain only the lecture name (e.g. "解析学"). Never include classroom codes or IDs in the course field.
+- The location field must contain classroom strings exactly as written (e.g. "C3 100", "W1-115", "101教室"). If no classroom is given, set location to null.
 
 Text:
 ---
@@ -499,6 +518,7 @@ Text:
     data = normalize_schedule_response(json.loads(raw_json), timezone=timezone)
     for entry in data["schedule"]:
         entry.setdefault("location", None)
+        sanitize_entry_fields(entry)
     return data
 
 
@@ -526,7 +546,7 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
 - 出力はJSONのみ。前後に説明文やコードブロックは不要。
 - 時刻は24時間表記 "HH:MM"。
 - 曜日は "Mon","Tue","Wed","Thu","Fri","Sat","Sun" のいずれか。
-- locationは表に記載された教室表記（例: "C3 100", "W2-101", "101教室"）をそのまま入れる。見つからなければ null。
+- course には授業名のみを入れ、location には教室表記（例: "C3 100", "W2-101", "101教室"）のみを入れてください。教室コードを course に含めてはいけません。教室が無ければ location は null。
 - 日本語の「n限」は、以下のデフォルト対応を使って開始/終了を決めてください（本文中に別の時間が明記されていればそちらを優先）:
 {period_hint}
 
@@ -576,6 +596,7 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
     data = normalize_schedule_response(json.loads(raw_json), timezone=timezone)
     for entry in data["schedule"]:
         entry.setdefault("location", None)
+        sanitize_entry_fields(entry)
     return data
 
 
@@ -623,6 +644,9 @@ JSONのみを返してください:
     if "old" not in data or "new" not in data:
         raise ValueError("old/new が含まれていない応答でした。")
     data.setdefault("timezone", timezone)
+    for key in ("old", "new"):
+        if isinstance(data.get(key), dict):
+            sanitize_entry_fields(data[key])
     return data
 
 
@@ -676,6 +700,7 @@ def call_chatgpt_to_extract_location_updates(text: str, model=DEFAULT_OPENAI_MOD
         raise ValueError("updates が空でした。")
     for entry in updates:
         entry.setdefault("location", None)
+        sanitize_entry_fields(entry)
     data["updates"] = updates
     return data
 
@@ -1094,7 +1119,7 @@ def process_timetable_async(user_id: str, text: str, minutes_before: int):
             line_push_text(user_id, f"時間割の解析に失敗しました。{err or ''}".strip())
             return
         else:
-            line_push_text(user_id, "OpenAIが利用できないため、簡易解析で登録します。")
+            line_push_text(user_id, "OpenAIの解析結果から授業を取得できなかったため、簡易解析で登録します。")
     print(f"user_id={user_id}")
 
     # 2) スケジュール登録
