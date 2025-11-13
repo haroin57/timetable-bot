@@ -460,16 +460,14 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_M
         "大学の時間割テキスト（日本語を含む）から授業情報を抽出し、指定フォーマットの JSON だけを出力してください。"
     )
     user = f"""
-以下の文章には大学の時間割が記載されています。各授業について次の項目を必ず含めてください:
-- day: Mon/Tue/Wed/Thu/Fri/Sat/Sun のいずれか
-- start, end: 24時間表記 HH:MM
-- course: 授業名のみ（教室コードや ID を含めない）
-- location: 教室名・教室コード（例: C3 100, W1-115, 101教室）。教室が無い場合は null
-
-「n限」表記は以下の対応で開始・終了時刻に変換してください（本文に具体的な時刻があればそちらを優先）:
+Input text may contain Japanese timetable descriptions. Extract each class with fields day/start/end/course/location.
+Guidelines:
+- Output JSON only, no prose.
+- Times must be 24-hour HH:MM.
+- Day must be Mon/Tue/Wed/Thu/Fri/Sat/Sun.
+- If the text shows "n限", map it using:
 {period_hint}
-
-出力は JSON のみで、説明文やコードブロックは付けないでください。
+- Use location strings as-is; if missing, output null.
 
 対象テキスト:
 ---
