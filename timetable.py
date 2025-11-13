@@ -1108,6 +1108,7 @@ def process_timetable_async(user_id: str, text: str, minutes_before: int):
         )
     except Exception as e:
         err = e
+        print(f"[OpenAI schedule error] {e}", flush=True)
     if not schedule_data or not schedule_data.get("schedule"):
         schedule_data = parse_timetable_locally(text, timezone="Asia/Tokyo")
         if not schedule_data.get("schedule"):
@@ -1149,6 +1150,7 @@ def process_image_timetable_async(user_id: str, message_id: str, minutes_before:
         )
     except Exception as e:
         err = e
+        print(f"[OpenAI image schedule error] {e}", flush=True)
 
     if not schedule_data or not schedule_data.get("schedule"):
         detail = str(err).strip() if err else "OpenAIの応答から授業が見つかりませんでした。"
