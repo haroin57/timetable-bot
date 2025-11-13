@@ -99,11 +99,15 @@ def compute_notify_slot(day_idx: int, start_hm: str, offset_min: int):
     return notify_dt.weekday(), notify_dt.strftime("%H:%M")
 
 def extract_json_from_text(text: str) -> str:
-    first = text.find("{")
-    last = text.rfind("}")
-    if first == -1 or last == -1 or last < first:
-        raise ValueError("JSONっぽい部分を検出できませんでした。")
-    return text[first:last+1]
+    decoder = json.JSONDecoder()
+    idx = text.find("{")
+    while idx != -1:
+        try:
+            obj, end = decoder.raw_decode(text[idx:])
+            return json.dumps(obj, ensure_ascii=False)
+        except json.JSONDecodeError:
+            idx = text.find("{", idx + 1)
+    raise ValueError("JSONっぽい部分を検出できませんでした。")
 
 LOCATION_HEAD_RE = re.compile(r"^[A-Z]{1,2}\d{1,2}$")
 LOCATION_COMBINED_RE = re.compile(r"^[A-Z]{1,2}\d{1,2}[-－]?\d{2,3}$")
