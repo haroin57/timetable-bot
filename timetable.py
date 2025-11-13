@@ -118,7 +118,7 @@ def extract_json_from_text(text: str) -> str:
             return json.dumps(obj, ensure_ascii=False)
         except json.JSONDecodeError:
             idx = text.find("{", idx + 1)
-    raise ValueError("JSONっぽい部分を検出できませんでした。")
+    raise ValueError("LINEのメッセージの返信はできませんので、ご了承ください。")
 
 def normalize_schedule_response(data, timezone="Asia/Tokyo"):
     if isinstance(data, list):
@@ -1360,7 +1360,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
         elif etype == "follow" and user_id:
             try:
                 line_push_text(user_id, "友だち追加ありがとうございます。時間割のテキストまたは画像を送ってください。時間割のテキストはかなり適当でも拾うようになっているので適当で大丈夫です。例: 月1限 解析学 / 火2限 英語\n")
-                linme_push_text(user_id, HELP_TEXT)
+                line_push_text(user_id, HELP_TEXT)
             except Exception as e:
                 print(f"初回メッセージ送信失敗: {e}")
 
