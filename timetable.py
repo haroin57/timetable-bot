@@ -43,8 +43,8 @@ DEFAULT_PERIOD_MAP = {
     "6": {"start": "18:00", "end": "19:30"},
 }
 
-DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
-DEFAULT_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", DEFAULT_OPENAI_MODEL)
+DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+DEFAULT_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4o")
 
 VIEW_COMMANDS = {"一覧", "確認", "時間割", "schedule", "list"}
 
@@ -267,6 +267,7 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_M
     content = resp.choices[0].message.content
     raw_json = extract_json_from_text(content)
     data = normalize_schedule_response(json.loads(raw_json), timezone=timezone)
+    print(f"Extracted schedule: {data}") # Debug log
     for entry in data["schedule"]:
         entry.setdefault("location", None)
     return data
@@ -286,9 +287,16 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
         "Read timetable screenshots (possibly Japanese) and output normalized JSON. "
         "Use only the schema and output JSON only with no extra text."
     )
+    
     user_text = (
         f"画像内の大学時間割を読み取り、曜日/開始/終了/科目/教室を抽出してJSONで返してください。"
         f"タイムゾーンは {timezone}。"
+        f"渡すデータは大学の時間割のスクリーンショットです。日本語の「n限」「月〜金」などが含まれます。"
+        f"目的: 各授業の「曜日」「開始時刻」「終了時刻」「科目名」「教室」を抽出し、統一フォーマットのJSONで出力してください。"
+        f"制約:"
+        f"- 出力はJSONのみ。前後に説明文やコードブロックは不要。"
+        f"- 時刻は24時間表記 \"HH:MM\"。"
+        f"- 曜日は \"Mon\",\"Tue\",\"Wed\",\"Thu\",\"Fri\",\"Sat\",\"Sun\" のいずれか。"
     )
 
     client = OpenAI()
@@ -307,6 +315,16 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
         ],
     )
     content = resp.choices[0].message.content
+    if isinstance(content, list):
+    # text パートだけを連結
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(part.get("text", ""))
+        content = "\n".join(parts)
+
+    if not isinstance(content, str):
+        raise ValueError(f"Unexpected content type: {type(content)}")
     raw_json = extract_json_from_text(content)
     data = normalize_schedule_response(json.loads(raw_json), timezone=timezone)
     for entry in data["schedule"]:
@@ -855,7 +873,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     background_tasks.add_task(process_correction_async, user_id, f"置換:{replace_payload}")
                     continue
 
-                if is_view_command(text):
+                def is_view_command(text: str) -> bool:
                     state = USER_STATE.get(user_id)
                     if not state.get("schedule"):
                         line_reply_text(reply_token, ["まだ時間割が登録されていません。先に時間割を送信してください。"])
@@ -863,7 +881,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                         minutes_before = state.get("minutes_before", DEFAULT_MINUTES_BEFORE)
                         summary = summarize_schedule(state["schedule"])
                         line_reply_text(reply_token, [f"現在登録されている時間割です。\n通知: {minutes_before}分前\n{summary}"])
-                    continue
+                    return text.strip() in VIEW_COMMANDS
 
                 minutes_before = ensure_user_state(user_id).get("minutes_before", DEFAULT_MINUTES_BEFORE)
                 line_reply_text(reply_token, ["入力を受けつけました。しばらくお待ちください。"])
