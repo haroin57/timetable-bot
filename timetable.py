@@ -191,23 +191,6 @@ def split_course_and_location(course_raw: str) -> tuple[str, str | None]:
         return (course or text).strip(), loc or None
     return text, None
 
-COURSE_CODE_RE = re.compile(r"^[A-Z]\d{5,}$")
-
-def is_probably_course_code(token: str) -> bool:
-    token = (token or "").strip()
-    return bool(token and COURSE_CODE_RE.match(token))
-
-def sanitize_entry_fields(entry: dict):
-    course_raw = (entry.get("course") or "").strip()
-    location_raw = (entry.get("location") or "").strip()
-    course_clean, loc_hint = split_course_and_location(course_raw)
-    if loc_hint and not location_raw:
-        location_raw = loc_hint
-    course_clean = re.sub(r"\([^()]*\)$", "", course_clean).strip() or course_clean
-    if location_raw and is_probably_course_code(location_raw):
-        location_raw = None
-    entry["course"] = course_clean or course_raw
-    entry["location"] = location_raw or None
 
 def extract_command_payload(text: str, keyword: str) -> str | None:
     stripped = text.strip()
@@ -274,7 +257,6 @@ def parse_entries_with_gpt(text: str, timezone: str = "Asia/Tokyo") -> dict:
             raise ValueError(f"解析に失敗しました。{err or ''}".strip())
     for entry in schedule_data.get("schedule", []):
         entry.setdefault("location", None)
-        sanitize_entry_fields(entry)
     return schedule_data
 
 
@@ -298,15 +280,50 @@ def entry_matches_pattern(entry: dict, pattern: dict) -> bool:
     return True
 
 
+def _course_match(existing: dict, pattern: dict) -> bool:
+    course = (pattern.get("course") or "").strip().lower()
+    if not course:
+        return False
+    existing_course = (existing.get("course") or "").lower()
+    return course in existing_course
+
+
 def delete_entries_by_patterns(base: dict, patterns: list[dict]) -> tuple[dict, int]:
+    targets = [dict(p, _matched=False) for p in patterns if p]
     removed = 0
-    new_list = []
+    remaining = []
+
     for entry in base.get("schedule", []):
-        if any(entry_matches_pattern(entry, p) for p in patterns):
-            removed += 1
-        else:
-            new_list.append(entry)
-    return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_list}, removed
+        matched = False
+        for target in targets:
+            if target["_matched"]:
+                continue
+            if entry_matches_pattern(entry, target):
+                target["_matched"] = True
+                matched = True
+                removed += 1
+                break
+        if not matched:
+            remaining.append(entry)
+
+    if removed == len(targets) or not targets:
+        return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": remaining}, removed
+
+    new_remaining = []
+    for entry in remaining:
+        matched = False
+        for target in targets:
+            if target["_matched"]:
+                continue
+            if _course_match(entry, target):
+                target["_matched"] = True
+                matched = True
+                removed += 1
+                break
+        if not matched:
+            new_remaining.append(entry)
+
+    return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_remaining}, removed
 
 
 def replace_entry_with_pattern(base: dict, old_pattern: dict, new_entry: dict) -> tuple[dict, bool]:
@@ -325,22 +342,69 @@ def replace_entry_with_pattern(base: dict, old_pattern: dict, new_entry: dict) -
             replaced = True
         else:
             new_list.append(entry)
-    return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_list}, replaced
+
+    if replaced:
+        return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_list}, True
+
+    for idx, entry in enumerate(new_list):
+        if _course_match(entry, old_pattern):
+            new_list[idx] = {
+                "day": new_entry.get("day", entry.get("day")),
+                "start": new_entry.get("start", entry.get("start")),
+                "end": new_entry.get("end") or entry.get("end"),
+                "course": new_entry.get("course", entry.get("course")),
+                "location": new_entry.get("location") if new_entry.get("location") is not None else entry.get("location"),
+            }
+            return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_list}, True
+
+    return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_list}, False
 
 
 def update_locations_with_entries(base: dict, entries: list[dict]) -> tuple[dict, int]:
+    targets = []
+    for entry in entries:
+        loc = (entry.get("location") or "").strip()
+        if not loc:
+            continue
+        target = dict(entry)
+        target["_matched"] = False
+        target["location"] = loc
+        targets.append(target)
+
+    if not targets:
+        return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": base.get("schedule", [])}, 0
+
     updated = 0
     new_list = []
-    for existing in base.get("schedule", []):
+    schedule_list = base.get("schedule", [])
+
+    # First pass: strict matching by day/time/course/location pattern.
+    for existing in schedule_list:
         updated_entry = dict(existing)
-        for target in entries:
+        for target in targets:
+            if target["_matched"]:
+                continue
             if entry_matches_pattern(existing, target):
-                new_loc = (target.get("location") or "").strip()
-                if new_loc:
-                    updated_entry["location"] = new_loc
-                    updated += 1
+                updated_entry["location"] = target["location"]
+                target["_matched"] = True
+                updated += 1
                 break
         new_list.append(updated_entry)
+
+    if updated == len(targets):
+        return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_list}, updated
+
+    for idx, existing in enumerate(new_list):
+        for target in targets:
+            if target["_matched"]:
+                continue
+            if _course_match(existing, target):
+                new_list[idx] = dict(existing)
+                new_list[idx]["location"] = target["location"]
+                target["_matched"] = True
+                updated += 1
+                break
+
     return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_list}, updated
 
 
@@ -392,22 +456,22 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_M
     period_hint = "\n".join([f"{k}限: {v['start']}–{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()])
 
     system = (
-        "You are a strict JSON extractor. "
-        "Extract university timetable (possibly Japanese) into normalized JSON. "
-        "Use only the schema and output JSON only with no extra text."
+        "あなたは厳密な JSON 抽出器です。"
+        "大学の時間割テキスト（日本語を含む）から授業情報を抽出し、指定フォーマットの JSON だけを出力してください。"
     )
     user = f"""
-Input text may contain Japanese timetable descriptions. Extract each class with fields day/start/end/course/location.
-Guidelines:
-- Output JSON only, no prose.
-- Times must be 24-hour HH:MM.
-- Day must be Mon/Tue/Wed/Thu/Fri/Sat/Sun.
-- If the text shows "n限", map it using:
-{period_hint}
-- The course field must contain only the lecture name (e.g. "解析学"). Never include classroom codes or IDs in the course field.
-- The location field must contain classroom strings exactly as written (e.g. "C3 100", "W1-115", "101教室"). If no classroom is given, set location to null.
+以下の文章には大学の時間割が記載されています。各授業について次の項目を必ず含めてください:
+- day: Mon/Tue/Wed/Thu/Fri/Sat/Sun のいずれか
+- start, end: 24時間表記 HH:MM
+- course: 授業名のみ（教室コードや ID を含めない）
+- location: 教室名・教室コード（例: C3 100, W1-115, 101教室）。教室が無い場合は null
 
-Text:
+「n限」表記は以下の対応で開始・終了時刻に変換してください（本文に具体的な時刻があればそちらを優先）:
+{period_hint}
+
+出力は JSON のみで、説明文やコードブロックは付けないでください。
+
+対象テキスト:
 ---
 {timetable_text}
 ---
@@ -436,7 +500,6 @@ Text:
     data = normalize_schedule_response(json.loads(raw_json), timezone=timezone)
     for entry in data["schedule"]:
         entry.setdefault("location", None)
-        sanitize_entry_fields(entry)
     return data
 
 
@@ -451,21 +514,19 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     data_url = f"data:{mime_type};base64,{b64}"
     system = (
-        "You are a strict JSON extractor. "
-        "Read timetable screenshots (possibly Japanese) and output normalized JSON. "
-        "Use only the schema and output JSON only with no extra text."
+        "あなたは厳密な JSON 抽出器です。"
+        "時間割のスクリーンショット（日本語を含む）から授業情報を抽出し、指定フォーマットの JSON だけを出力してください。"
     )
     period_hint = "\n".join([f"{k}限: {v['start']}–{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()])
     user_text = f"""
-以下の画像には大学の時間割が写っています。日本語の「n限」「月〜金」などが含まれます。
-目的: 各授業の「曜日」「開始時刻」「終了時刻」「科目名」「教室」を抽出し、統一フォーマットのJSONで出力してください。
+以下の画像には大学の時間割が写っています。各授業について曜日・開始時刻・終了時刻・授業名・教室を抽出し、統一フォーマットの JSON で出力してください。
 
 制約:
-- 出力はJSONのみ。前後に説明文やコードブロックは不要。
-- 時刻は24時間表記 "HH:MM"。
-- 曜日は "Mon","Tue","Wed","Thu","Fri","Sat","Sun" のいずれか。
-- course には授業名のみを入れ、location には教室表記（例: "C3 100", "W2-101", "101教室"）のみを入れてください。教室コードを course に含めてはいけません。教室が無ければ location は null。
-- 日本語の「n限」は、以下のデフォルト対応を使って開始/終了を決めてください（本文中に別の時間が明記されていればそちらを優先）:
+- 出力は JSON のみ（説明文やコードブロックは禁止）
+- 時刻は 24 時間表記 HH:MM
+- 曜日は Mon/Tue/Wed/Thu/Fri/Sat/Sun
+- course には授業名のみ、location には教室表記（例: C3 100, W2-101, 101教室）のみを入れる。教室が無い場合は null
+- 「n限」表記は以下のデフォルト対応で開始・終了時刻に変換する（画像内に明示的な時刻があればそちらを優先）:
 {period_hint}
 
 スキーマ:
@@ -514,7 +575,6 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
     data = normalize_schedule_response(json.loads(raw_json), timezone=timezone)
     for entry in data["schedule"]:
         entry.setdefault("location", None)
-        sanitize_entry_fields(entry)
     return data
 
 
@@ -527,23 +587,27 @@ def call_chatgpt_to_extract_replacement(text: str, model=DEFAULT_OPENAI_MODEL, t
 
     period_hint = "\n".join([f"{k}限: {v['start']}–{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()])
     system = (
-        "You extract timetable replacement instructions. "
-        "Return JSON with keys 'timezone', 'old', 'new'. "
-        "Each of 'old' and 'new' must contain day/start/end/course/location (location may be null). "
-        "Output JSON only."
+        "あなたは時間割の置換指示を抽出するエージェントです。"
+        "timezone / old / new を含む JSON のみを出力してください。"
     )
     user = f"""
-文章には「どの授業を」「どの授業に」置き換えるかが書かれています。
-24時間表記の時刻、Mon/Tue... の曜日、省略時は n限 を {period_hint} の対応で解釈してください。
-JSONのみを返してください:
-{{
+文章にはどの授業をどの授業に置き換えるかが記載されています。
+- day は Mon/Tue/... の形
+- start,end は 24時間表記 HH:MM
+- course は授業名のみ
+- location は教室名（無ければ null）
+
+「n限」表記は以下の対応で解釈してください（本文に具体的な時刻があればそちらを優先）:
+{period_hint}
+
+出力は JSON のみです。
+
+例:
+{
   "timezone": "{timezone}",
-  "old": {{"day": "Mon", "start": "09:00", "end": "10:30", "course": "解析学", "location": null}},
-  "new": {{"day": "Tue", "start": "10:40", "end": "12:10", "course": "英語", "location": "C3 100"}}
-}}
----
-{text}
----
+  "old": {"day": "Mon", "start": "09:00", "end": "10:30", "course": "解析学", "location": null},
+  "new": {"day": "Tue", "start": "10:40", "end": "12:10", "course": "英語", "location": "C3 100"}
+}
 """.strip()
 
     client = OpenAI()
@@ -562,9 +626,6 @@ JSONのみを返してください:
     if "old" not in data or "new" not in data:
         raise ValueError("old/new が含まれていない応答でした。")
     data.setdefault("timezone", timezone)
-    for key in ("old", "new"):
-        if isinstance(data.get(key), dict):
-            sanitize_entry_fields(data[key])
     return data
 
 
@@ -577,15 +638,16 @@ def call_chatgpt_to_extract_location_updates(text: str, model=DEFAULT_OPENAI_MOD
 
     period_hint = "\n".join([f"{k}限: {v['start']}–{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()])
     system = (
-        "You extract classroom update instructions from Japanese descriptions. "
-        "Return JSON with keys 'timezone' and 'updates'. "
-        "'updates' is a list of entries each containing day/start/end/course/location. "
-        "location must be the new classroom name. Output JSON only."
+        "あなたは教室変更の指示を抽出するエージェントです。"
+        "timezone と updates を含む JSON のみを出力してください。"
     )
     user = f"""
 文章には教室を変更したい授業と新しい教室名が書かれています。複数指定される場合もあります。
-曜日は Mon/Tue... または 月〜日、時刻は24時間表記に直し、n限は以下で換算してください:
+曜日は Mon/Tue... または 月/火...、時刻は 24時間表記 HH:MM に直してください。
+
+「n限」表記は以下の対応で時刻に変換します（本文に具体的な時刻があればそちらを優先）:
 {period_hint}
+
 出力フォーマット:
 {{
   "timezone": "{timezone}",
@@ -593,10 +655,6 @@ def call_chatgpt_to_extract_location_updates(text: str, model=DEFAULT_OPENAI_MOD
     {{"day": "Mon", "start": "09:00", "end": "10:30", "course": "解析学", "location": "C3 101"}}
   ]
 }}
-必ず JSON のみにしてください。
----
-{text}
----
 """.strip()
 
     client = OpenAI()
@@ -618,7 +676,6 @@ def call_chatgpt_to_extract_location_updates(text: str, model=DEFAULT_OPENAI_MOD
         raise ValueError("updates が空でした。")
     for entry in updates:
         entry.setdefault("location", None)
-        sanitize_entry_fields(entry)
     data["updates"] = updates
     return data
 
@@ -1388,12 +1445,8 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                 continue
         elif etype == "follow" and user_id:
             try:
-<<<<<<< HEAD
                 line_push_text(user_id, "友だち追加ありがとうございます。時間割のテキストまたは画像を送ってください。時間割のテキストはかなり適当でも拾うようになっているので適当で大丈夫です。例: 月1限 解析学 / 火2限 英語演習")
                 line_push_text(user_id, HELP_TEXT)
-=======
-                line_push_text(user_id, "友だち追加ありがとうございます。時間割のテキストを送ってください。時間割のテキストはかなり適当でも拾うようになっているので適当で大丈夫です。例: 月:1限 解析学 / 火:2限 英語\n修正は 追加 / 削除 / 置換 で指定できます。")
->>>>>>> parent of e4d7950 (コマンド一致緩和ロジックを追加、その他修正)
             except Exception as e:
                 print(f"初回メッセージ送信失敗: {e}")
 
