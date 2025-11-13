@@ -606,7 +606,13 @@ def process_correction_async(user_id: str, text: str):
             new_list = []
             for e in current.get("schedule", []):
                 if not replaced and ((e["day"] == o["day"] and e["start"] == o["start"]) or (o["course"] in e["course"])):
-                    new_list.append({"day": n["day"], "start": n["start"], "end": n.get("end"), "course": n["course"]})
+                    new_list.append({
+                        "day": n["day"],
+                        "start": n["start"],
+                        "end": n.get("end"),
+                        "course": n["course"],
+                        "location": n.get("location"),
+                    })
                     replaced = True
                 else:
                     new_list.append(e)
@@ -704,6 +710,9 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     st = ensure_user_state(user_id)
                     st["minutes_before"] = minutes_before
                     persist_user_state(user_id)
+                    sched = st.get("schedule") or {}
+                    if sched.get("schedule"):
+                        schedule_jobs_for_user(user_id, sched, minutes_before=minutes_before)
                     line_reply_text(reply_token, [f"通知タイミングを {minutes_before} 分前に設定しました。時間割テキストを送ってください。"])
                 except Exception:
                     line_reply_text(reply_token, ["通知 10 の形式で分数を指定してください。"])
