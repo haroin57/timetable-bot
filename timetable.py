@@ -43,6 +43,36 @@ DEFAULT_PERIOD_MAP = {
     "6": {"start": "18:00", "end": "19:30"},
 }
 
+VIEW_COMMANDS = {"一覧", "確認", "時間割", "schedule", "list"}
+
+HELP_COMMANDS = {"help", "ヘルプ", "使い方"}
+
+RESET_COMMANDS = {"リセット", "reset", "クリア", "clear"}
+
+
+
+HELP_TEXT = (
+
+    "利用できる主なコマンド:\n"
+
+    "・通知 10 … 通知タイミングを分単位で設定\n"
+
+    "・追加 月 1限 解析学 … 授業を追加\n"
+
+    "・削除 火 10:40-12:10 … 授業を削除\n"
+
+    "・置換 (1行目:変更前, 2行目以降:変更後)\n"
+
+    "・リセット … 登録済みの時間割をすべて削除\n"
+
+    "・一覧 … 現在登録済みの時間割を表示\n"
+
+    "そのほか時間割テキストを送信すると解析して登録します。"
+
+)
+
+
+
 DB_PATH = os.getenv("USER_STATE_DB", os.path.join(os.getcwd(), "user_state.db"))
 DB_CONN: sqlite3.Connection | None = None
 DB_LOCK = threading.Lock()
@@ -97,7 +127,7 @@ def split_course_and_location(course_raw: str) -> tuple[str, str | None]:
     if not text:
         return "", None
 
-    # e.g. "数学 (101教室)" → course + location
+    # e.g. "数学 (101教室)" -> course + location
     m = re.search(r"(?:\(|（)([^()（）]*?教室[^()（）]*?)(?:\)|）)\s*$", text)
     if m:
         course = text[:m.start()].rstrip(" ／、-－　")
@@ -130,6 +160,38 @@ def split_course_and_location(course_raw: str) -> tuple[str, str | None]:
         loc = " ".join(loc_tokens).strip()
         return (course or text).strip(), loc or None
     return text, None
+
+def extract_command_payload(text: str, keyword: str) -> str | None:
+    stripped = text.strip()
+    if not stripped.startswith(keyword):
+        return None
+    rest = stripped[len(keyword):]
+    if not rest:
+        return ""
+    if rest[0] in (":", "："):
+        rest = rest[1:]
+    return rest.strip()
+
+
+def parse_replacement_parts(body: str) -> tuple[str, str] | None:
+    for sep in ("->", "\u2192"):
+        if sep in body:
+            left, right = body.split(sep, 1)
+            left = left.strip()
+            right = right.strip()
+            if left and right:
+                return left, right
+
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    if len(lines) >= 2:
+        return lines[0], " ".join(lines[1:])
+
+    parts = re.split(r"\s{2,}|[／/|｜]", body, maxsplit=1)
+    if len(parts) == 2:
+        left, right = parts[0].strip(), parts[1].strip()
+        if left and right:
+            return left, right
+    return None
 
 def call_chatgpt_to_extract_schedule(timetable_text: str, model="gpt-4o-mini", timezone="Asia/Tokyo"):
     api_key = os.getenv("OPENAI_API_KEY")
@@ -351,6 +413,13 @@ def persist_user_state(user_id: str):
     except Exception as e:
         print(f"user_stateの保存に失敗しました(user_id={user_id}): {e}")
 
+def reset_user_schedule(user_id: str):
+    schedule.clear(f"user:{user_id}")
+    state = ensure_user_state(user_id)
+    state["schedule"] = _empty_schedule()
+    state["updated_at"] = datetime.now()
+    persist_user_state(user_id)
+
 def summarize_schedule(schedule_data: dict, limit: int = 20) -> str:
     rows = []
     for item in schedule_data.get("schedule", [])[:limit]:
@@ -445,7 +514,7 @@ def summarize_and_push(user_id: str, minutes_before: int, schedule_data: dict, p
     line_push_text(user_id, msg)
 
 def process_timetable_async(user_id: str, text: str, minutes_before: int):
-    # 1) OpenAIで解析→失敗時は簡易パーサー
+    # 1) OpenAIで解析->失敗時は簡易パーサー
     schedule_data = None
     err = None
     try:
@@ -472,7 +541,7 @@ def process_timetable_async(user_id: str, text: str, minutes_before: int):
     state["updated_at"] = datetime.now()
     persist_user_state(user_id)
     # 4) 完了通知 + 内訳
-    summarize_and_push(user_id, minutes_before, schedule_data, "時間割の登録が完了しました。内訳は以下です。誤りがあれば「追加:」「削除:」「置換:」で修正できます。")
+    summarize_and_push(user_id, minutes_before, schedule_data, "時間割の登録が完了しました。内訳は以下です。誤りがあれば「追加」「削除」「置換」で修正できます。")
 
 def process_correction_async(user_id: str, text: str):
     state = USER_STATE.get(user_id)
@@ -484,38 +553,55 @@ def process_correction_async(user_id: str, text: str):
 
     t = text.strip()
     try:
-        if t.startswith("追加:"):
-            body = t.split(":", 1)[1].strip()
-            # まず簡易パーサー→取れなければOpenAI
+        add_body = extract_command_payload(t, "追加")
+        if add_body is not None:
+            body = add_body.strip()
+            if not body:
+                line_push_text(user_id, "追加 月 10:40-12:10 英語 のように入力してください。")
+                return
             adds = parse_timetable_locally(body, timezone=current.get("timezone", "Asia/Tokyo"))
             if not adds.get("schedule"):
                 try:
-                    adds = call_chatgpt_to_extract_schedule(body, model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-                                                            timezone=current.get("timezone", "Asia/Tokyo"))
+                    adds = call_chatgpt_to_extract_schedule(
+                        body,
+                        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                        timezone=current.get("timezone", "Asia/Tokyo"),
+                    )
                 except Exception:
                     pass
             if not adds.get("schedule"):
-                line_push_text(user_id, "追加の解析に失敗しました。例: 追加: 火 10:40-12:10 英語")
+                line_push_text(user_id, "追加の解析に失敗しました。例: 追加 火 10:40-12:10 英語")
                 return
             new_sched = merge_additions(current, adds)
-        elif t.startswith("削除:"):
-            body = t.split(":", 1)[1].strip()
-            new_sched = delete_by_filter(current, body)
-        elif t.startswith("置換:") or t.startswith("修正:"):
-            body = t.split(":", 1)[1].strip()
-            parts = [p.strip() for p in re.split(r"->|→", body, maxsplit=1)]
-            if len(parts) != 2:
-                line_push_text(user_id, "置換の形式は 置換: <旧> -> <新> です。")
+        elif (delete_body := extract_command_payload(t, "削除")) is not None:
+            body = delete_body.strip()
+            if not body:
+                line_push_text(user_id, "削除 月 1限 解析学 のように入力してください。")
                 return
-            old, new = parts
+            new_sched = delete_by_filter(current, body)
+        else:
+            replace_body = extract_command_payload(t, "置換")
+            if replace_body is None:
+                replace_body = extract_command_payload(t, "修正")
+            if replace_body is None:
+                line_push_text(user_id, "修正コマンドが認識できません。次のいずれかを使ってください: 追加 / 削除 / 置換")
+                return
+            body = replace_body.strip()
+            if not body:
+                line_push_text(user_id, "置換 コマンドは 1行目=変更前, 2行目以降=変更後 の形式で入力してください。")
+                return
+            parsed = parse_replacement_parts(body)
+            if not parsed:
+                line_push_text(user_id, "置換 コマンドは 1行目=変更前, 2行目以降=変更後 です。例:\n置換\n水 13:00-14:30 物理\n木 14:40-16:10 物理")
+                return
+            old, new = parsed
             old_parsed = parse_timetable_locally(old, timezone=current.get("timezone", "Asia/Tokyo"))
             new_parsed = parse_timetable_locally(new, timezone=current.get("timezone", "Asia/Tokyo"))
             if not old_parsed.get("schedule") or not new_parsed.get("schedule"):
-                line_push_text(user_id, "置換の解析に失敗しました。例: 置換: 水 13:00-14:30 物理 -> 木 14:40-16:10 物理")
+                line_push_text(user_id, "置換の解析に失敗しました。例:\n置換\n水 13:00-14:30 物理\n木 14:40-16:10 物理")
                 return
             o = old_parsed["schedule"][0]
             n = new_parsed["schedule"][0]
-            # day+start一致 or course一致で最初の1件を差し替え
             replaced = False
             new_list = []
             for e in current.get("schedule", []):
@@ -528,11 +614,7 @@ def process_correction_async(user_id: str, text: str):
                 line_push_text(user_id, "対象が見つからず置換できませんでした。")
                 return
             new_sched = {"timezone": current.get("timezone", "Asia/Tokyo"), "schedule": new_list}
-        else:
-            line_push_text(user_id, "修正コマンドが認識できません。次のいずれかを使ってください: 追加:/削除:/置換:")
-            return
 
-        # 登録し直し + 状態更新
         schedule_jobs_for_user(user_id, new_sched, minutes_before=minutes_before)
         state = ensure_user_state(user_id)
         state["minutes_before"] = minutes_before
@@ -588,22 +670,73 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
         if etype == "message" and ev.get("message", {}).get("type") == "text" and user_id:
             text = ev["message"]["text"].strip()
 
+            if text in HELP_COMMANDS:
+                line_reply_text(reply_token, [HELP_TEXT])
+                continue
+
+            if text in VIEW_COMMANDS:
+                state = USER_STATE.get(user_id)
+                if not state or not state.get("schedule") or not state["schedule"].get("schedule"):
+                    line_reply_text(reply_token, ["まだ時間割が登録されていません。先に時間割を送信してください。"])
+                else:
+                    minutes_before = state.get("minutes_before", DEFAULT_MINUTES_BEFORE)
+                    summary = summarize_schedule(state["schedule"])
+                    line_reply_text(reply_token, [f"現在登録されている時間割です。\n通知: {minutes_before}分前\n{summary}"])
+                continue
+
+            if text in RESET_COMMANDS:
+                state = USER_STATE.get(user_id)
+                if not state or not state.get("schedule") or not state["schedule"].get("schedule"):
+                    line_reply_text(reply_token, ["まだ時間割が登録されていません。"])
+                else:
+                    reset_user_schedule(user_id)
+                    line_reply_text(reply_token, ["登録済みの時間割をリセットしました。新しい時間割を送信してください。"])
+                continue
+
             # 通知分設定
-            if text.startswith("通知:"):
+            notify_payload = extract_command_payload(text, "通知")
+            if notify_payload is not None:
+                if not notify_payload:
+                    line_reply_text(reply_token, ["通知 10 のように分数を続けて入力してください。"])
+                    continue
                 try:
-                    minutes_before = int(text.split(":", 1)[1].strip())
+                    minutes_before = int(notify_payload.strip())
                     st = ensure_user_state(user_id)
                     st["minutes_before"] = minutes_before
                     persist_user_state(user_id)
                     line_reply_text(reply_token, [f"通知タイミングを {minutes_before} 分前に設定しました。時間割テキストを送ってください。"])
                 except Exception:
-                    line_reply_text(reply_token, ["通知:10 の形式で分数を指定してください。"])
+                    line_reply_text(reply_token, ["通知 10 の形式で分数を指定してください。"])
                 continue
 
             # 修正コマンド
-            if text.startswith(("追加:", "削除:", "置換:", "修正:")):
+            add_payload = extract_command_payload(text, "追加")
+            if add_payload is not None:
+                if not add_payload:
+                    line_reply_text(reply_token, ["追加 月 10:40-12:10 英語 のように入力してください。"])
+                    continue
                 line_reply_text(reply_token, ["修正内容を受け付けました。反映後に最新の時間割をお送りします。"])
-                background_tasks.add_task(process_correction_async, user_id, text)
+                background_tasks.add_task(process_correction_async, user_id, f"追加:{add_payload}")
+                continue
+
+            delete_payload = extract_command_payload(text, "削除")
+            if delete_payload is not None:
+                if not delete_payload:
+                    line_reply_text(reply_token, ["削除 月 1限 解析学 のように入力してください。"])
+                    continue
+                line_reply_text(reply_token, ["修正内容を受け付けました。反映後に最新の時間割をお送りします。"])
+                background_tasks.add_task(process_correction_async, user_id, f"削除:{delete_payload}")
+                continue
+
+            replace_payload = extract_command_payload(text, "置換")
+            if replace_payload is None:
+                replace_payload = extract_command_payload(text, "修正")
+            if replace_payload is not None:
+                if not replace_payload:
+                    line_reply_text(reply_token, ["置換 コマンドは 1行目=変更前, 2行目以降=変更後 の形式で入力してください。"])
+                    continue
+                line_reply_text(reply_token, ["修正内容を受け付けました。反映後に最新の時間割をお送りします。"])
+                background_tasks.add_task(process_correction_async, user_id, f"置換:{replace_payload}")
                 continue
 
             # 新規登録: まず即時返信、処理は非同期
@@ -613,7 +746,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
 
         elif etype == "follow" and user_id:
             try:
-                line_push_text(user_id, "友だち追加ありがとうございます。時間割のテキストを送ってください。時間割のテキストはかなり適当でも拾うようになっているので適当で大丈夫です。例: 月:1限 解析学 / 火:2限 英語\n修正は 追加:/削除:/置換: で指定できます。")
+                line_push_text(user_id, "友だち追加ありがとうございます。時間割のテキストを送ってください。時間割のテキストはかなり適当でも拾うようになっているので適当で大丈夫です。例: 月:1限 解析学 / 火:2限 英語\n修正は 追加 / 削除 / 置換 で指定できます。")
             except Exception as e:
                 print(f"初回メッセージ送信失敗: {e}")
 
