@@ -230,26 +230,16 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_M
         "Use only the schema and output JSON only with no extra text."
     )
     user = f"""
-以下は大学の時間割テキストです。日本語の「n限」「月〜金」などが含まれます。
-目的: 各授業の「曜日」「開始時刻」「終了時刻」「科目名」「教室」を抽出し、統一フォーマットのJSONで出力してください。
-
-制約:
-- 出力はJSONのみ。前後に説明文やコードブロックは不要。
-- 時刻は24時間表記 "HH:MM"。
-- 曜日は "Mon","Tue","Wed","Thu","Fri","Sat","Sun" のいずれか。
-- locationはテキスト末尾などに記載された教室表記（例: "C3 100", "W2-101", "101教室"）をそのまま入れる。見つからなければ null。
-- 日本語の「n限」は、以下のデフォルト対応を使って開始/終了を決めてください（本文中に別の時間が明記されていればそちらを優先）:
+Input text may contain Japanese timetable descriptions. Extract each class with fields day/start/end/course/location.
+Guidelines:
+- Output JSON only, no prose.
+- Times must be 24-hour HH:MM.
+- Day must be Mon/Tue/Wed/Thu/Fri/Sat/Sun.
+- If the text shows "n限", map it using:
 {period_hint}
+- Use location strings as-is; if missing, output null.
 
-スキーマ:
-{{
-  "timezone": "{timezone}",
-  "schedule": [
-    {{"day": "Mon", "start": "09:00", "end": "10:30", "course": "科目名", "location": "C3 100"}}
-  ]
-}}
-
-時間割テキスト:
+Text:
 ---
 {timetable_text}
 ---
@@ -274,6 +264,15 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_M
     if not isinstance(content, str):
         raise ValueError(f"Unexpected content type: {type(content)}")
 
+    raw_json = extract_json_from_text(content)
+    data = normalize_schedule_response(json.loads(raw_json), timezone=timezone)
+    for entry in data["schedule"]:
+        entry.setdefault("location", None)
+    return data
+
+
+def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: str = "image/png",
+                                                model=DEFAULT_VISION_MODEL, timezone="Asia/Tokyo"):
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY が未設定です。")
@@ -287,16 +286,10 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_M
         "Read timetable screenshots (possibly Japanese) and output normalized JSON. "
         "Use only the schema and output JSON only with no extra text."
     )
-    
+
     user_text = (
-        f"画像内の大学時間割を読み取り、曜日/開始/終了/科目/教室を抽出してJSONで返してください。"
-        f"タイムゾーンは {timezone}。"
-        f"渡すデータは大学の時間割のスクリーンショットです。日本語の「n限」「月〜金」などが含まれます。"
-        f"目的: 各授業の「曜日」「開始時刻」「終了時刻」「科目名」「教室」を抽出し、統一フォーマットのJSONで出力してください。"
-        f"制約:"
-        f"- 出力はJSONのみ。前後に説明文やコードブロックは不要。"
-        f"- 時刻は24時間表記 \"HH:MM\"。"
-        f"- 曜日は \"Mon\",\"Tue\",\"Wed\",\"Thu\",\"Fri\",\"Sat\",\"Sun\" のいずれか。"
+        f"The attached image is a university timetable. Extract each class (day/start/end/course/location) and output JSON. "
+        f"Timezone: {timezone}."
     )
 
     client = OpenAI()
@@ -323,14 +316,12 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_M
         content = "\n".join(parts)
     if not isinstance(content, str):
         raise ValueError(f"Unexpected content type: {type(content)}")
+
     raw_json = extract_json_from_text(content)
     data = normalize_schedule_response(json.loads(raw_json), timezone=timezone)
     for entry in data["schedule"]:
         entry.setdefault("location", None)
     return data
-
-
-
 
 
 # ====== LINE API / FastAPI Webhook (Unified with async + corrections) ======
