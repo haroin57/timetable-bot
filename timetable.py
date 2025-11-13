@@ -435,16 +435,22 @@ def clear_pending_command(user_id: str):
 
 COMMAND_GUIDANCE = {
     "add": "追加したい授業を自由な文章で教えてください。（例）月曜1限の解析学を追加して、教室はC3 101。",
-    "delete": "削除したい授業を自由に記述してください。（例）火曜10:40-12:10の英語を削除。",
+    "delete": "削除したい授業を自由に書いてください。（例）火曜10:40-12:10の英語を削除。",
     "replace": "どの授業をどの授業に置き換えるかを自由に書いてください。（例）月曜1限解析学を火曜2限英語に変更。",
     "location": "教室を変更したい授業と新しい教室を自由に書いてください。（例）水曜3限情報セキュリティをW2-201に移動。",
 }
 
 
+
 def request_command_details(reply_token: str, user_id: str, command_type: str):
     guidance = COMMAND_GUIDANCE.get(command_type, "内容を自由に入力してください。")
     set_pending_command(user_id, command_type)
-    line_reply_text(reply_token, [f"{guidance}\nキャンセルしたい場合は「いいえ」または「キャンセル」と送ってください。"])
+    line_reply_text(
+        reply_token,
+        [f"{guidance}\nキャンセルする場合は『いいえ』または『キャンセル』と送ってください。"],
+    )
+
+
 
 def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_MODEL, timezone="Asia/Tokyo"):
     api_key = os.getenv("OPENAI_API_KEY")
@@ -453,21 +459,26 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_M
     if OpenAI is None:
         raise RuntimeError("openai ライブラリが見つかりません。pip install openai を実行してください。")
 
-    period_hint = "\n".join([f"{k}限: {v['start']}–{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()])
+    period_hint = "\n".join(
+        f"{k}限: {v['start']}~{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()
+    )
 
     system = (
-        "あなたは厳密な JSON 抽出器です。"
-        "大学の時間割テキスト（日本語を含む）から授業情報を抽出し、指定フォーマットの JSON だけを出力してください。"
+        "あなたは厳密なJSON抽出器です。"
+        "大学の時間割テキスト（日本語を含む）から授業情報を抽出し、指定フォーマットのJSONのみを出力してください。"
     )
     user = f"""
-Input text may contain Japanese timetable descriptions. Extract each class with fields day/start/end/course/location.
-Guidelines:
-- Output JSON only, no prose.
-- Times must be 24-hour HH:MM.
-- Day must be Mon/Tue/Wed/Thu/Fri/Sat/Sun.
-- If the text shows "n限", map it using:
+以下の文章には大学の時間割が記載されています。各授業について次の項目を必ず含めてください。
+- day: Mon/Tue/Wed/Thu/Fri/Sat/Sun のいずれか
+- start, end: 24時間表記 HH:MM
+- course: 授業名のみ（Tから始まる7桁IDや「(16T以降)」などの注記は含めない）
+- location: 教室名・教室コード（例: C3 100, W1-115, 101教室）。教室が無い場合は null
+- Tから始まる7桁ID（例: T2043200）は授業コードなので JSON には一切出力しない
+
+「n限」表記は以下の対応で開始・終了時刻に変換してください（本文に具体的な時刻があればそちらを優先）。
 {period_hint}
-- Use location strings as-is; if missing, output null.
+
+出力はJSONのみで、説明文やコードブロックは不要です。
 
 対象テキスト:
 ---
@@ -515,7 +526,9 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
         "あなたは厳密な JSON 抽出器です。"
         "時間割のスクリーンショット（日本語を含む）から授業情報を抽出し、指定フォーマットの JSON だけを出力してください。"
     )
-    period_hint = "\n".join([f"{k}限: {v['start']}–{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()])
+    period_hint = "\n".join(
+        f"{k}限: {v['start']}~{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()
+    )
     user_text = f"""
 以下の画像には大学の時間割が写っています。各授業について曜日・開始時刻・終了時刻・授業名・教室を抽出し、統一フォーマットの JSON で出力してください。
 
@@ -523,7 +536,9 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
 - 出力は JSON のみ（説明文やコードブロックは禁止）
 - 時刻は 24 時間表記 HH:MM
 - 曜日は Mon/Tue/Wed/Thu/Fri/Sat/Sun
-- course には授業名のみ、location には教室表記（例: C3 100, W2-101, 101教室）のみを入れる。教室が無い場合は null
+- course には授業名のみ（Tから始まる7桁IDや「(16T以降)」などの注記は含めない）
+- location には教室表記（例: C3 100, W2-101, 101教室）のみを入れる。教室が無い場合は null
+- Tから始まる7桁ID（例: T2043200）は授業コードなので、JSON のどのフィールドにも出力しない
 - 「n限」表記は以下のデフォルト対応で開始・終了時刻に変換する（画像内に明示的な時刻があればそちらを優先）:
 {period_hint}
 
@@ -583,7 +598,9 @@ def call_chatgpt_to_extract_replacement(text: str, model=DEFAULT_OPENAI_MODEL, t
     if OpenAI is None:
         raise RuntimeError("openai ライブラリが見つかりません。pip install openai を実行してください。")
 
-    period_hint = "\n".join([f"{k}限: {v['start']}–{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()])
+    period_hint = "\n".join(
+        f"{k}限: {v['start']}~{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()
+    )
     system = (
         "あなたは時間割の置換指示を抽出するエージェントです。"
         "timezone / old / new を含む JSON のみを出力してください。"
@@ -592,8 +609,9 @@ def call_chatgpt_to_extract_replacement(text: str, model=DEFAULT_OPENAI_MODEL, t
 文章にはどの授業をどの授業に置き換えるかが記載されています。
 - day は Mon/Tue/... の形
 - start,end は 24時間表記 HH:MM
-- course は授業名のみ
-- location は教室名（無ければ null）
+- course は授業名のみ（Tから始まる7桁IDや「(16T以降)」などの注記は除外）
+- location は教室名のみ（無ければ null）
+- Tから始まる7桁IDは JSON に出力しない
 
 「n限」表記は以下の対応で解釈してください（本文に具体的な時刻があればそちらを優先）:
 {period_hint}
@@ -634,7 +652,9 @@ def call_chatgpt_to_extract_location_updates(text: str, model=DEFAULT_OPENAI_MOD
     if OpenAI is None:
         raise RuntimeError("openai ライブラリが見つかりません。pip install openai を実行してください。")
 
-    period_hint = "\n".join([f"{k}限: {v['start']}–{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()])
+    period_hint = "\n".join(
+        f"{k}限: {v['start']}~{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()
+    )
     system = (
         "あなたは教室変更の指示を抽出するエージェントです。"
         "timezone と updates を含む JSON のみを出力してください。"
@@ -642,6 +662,8 @@ def call_chatgpt_to_extract_location_updates(text: str, model=DEFAULT_OPENAI_MOD
     user = f"""
 文章には教室を変更したい授業と新しい教室名が書かれています。複数指定される場合もあります。
 曜日は Mon/Tue... または 月/火...、時刻は 24時間表記 HH:MM に直してください。
+- course は授業名のみ（Tから始まる7桁IDや「(16T以降)」などの注記は除外）
+- location は教室名のみを入れ、Tから始まるIDは無視する
 
 「n限」表記は以下の対応で時刻に変換します（本文に具体的な時刻があればそちらを優先）:
 {period_hint}
