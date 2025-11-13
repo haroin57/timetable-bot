@@ -467,9 +467,7 @@ Guidelines:
 - Day must be Mon/Tue/Wed/Thu/Fri/Sat/Sun.
 - If the text shows "n限", map it using:
 {period_hint}
-- Use classroom strings (e.g. "W1-101", "C3 201", "101教室") exactly in the location field. Never treat them as course names.
-- Course names must describe the lecture itself (e.g. "解析学", "情報セキュリティ") and must not include classroom codes.
-- If a classroom is missing, set location to null.
+- Use location strings as-is; if missing, output null.
 
 Text:
 ---
@@ -527,8 +525,7 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
 - 出力はJSONのみ。前後に説明文やコードブロックは不要。
 - 時刻は24時間表記 "HH:MM"。
 - 曜日は "Mon","Tue","Wed","Thu","Fri","Sat","Sun" のいずれか。
-- locationは表に記載された教室表記（例: "C3 100", "W2-101", "101教室"）をそのまま入れる。教室コードを科目名として扱ってはいけません。
-- course には授業名のみを入れ、教室コード・番号は含めないでください。
+- locationは表に記載された教室表記（例: "C3 100", "W2-101", "101教室"）をそのまま入れる。見つからなければ null。
 - 日本語の「n限」は、以下のデフォルト対応を使って開始/終了を決めてください（本文中に別の時間が明記されていればそちらを優先）:
 {period_hint}
 
@@ -598,7 +595,6 @@ def call_chatgpt_to_extract_replacement(text: str, model=DEFAULT_OPENAI_MODEL, t
     user = f"""
 文章には「どの授業を」「どの授業に」置き換えるかが書かれています。
 24時間表記の時刻、Mon/Tue... の曜日、省略時は n限 を {period_hint} の対応で解釈してください。
-教室コード（例: W1-115, C3 201）は location にのみ記載し、course には絶対に含めないでください。
 JSONのみを返してください:
 {{
   "timezone": "{timezone}",
@@ -647,7 +643,6 @@ def call_chatgpt_to_extract_location_updates(text: str, model=DEFAULT_OPENAI_MOD
 文章には教室を変更したい授業と新しい教室名が書かれています。複数指定される場合もあります。
 曜日は Mon/Tue... または 月〜日、時刻は24時間表記に直し、n限は以下で換算してください:
 {period_hint}
-教室コード（例: W2-201, C3 101）は location にのみ記載し、course は授業名のみにしてください。
 出力フォーマット:
 {{
   "timezone": "{timezone}",
@@ -917,38 +912,81 @@ def broadcast_message(text: str, delay: float = 0.1, reload_state: bool = True):
 DAY_JA_TO_EN = {"月":"Mon","火":"Tue","水":"Wed","木":"Thu","金":"Fri","土":"Sat","日":"Sun"}
 def parse_timetable_locally(timetable_text: str, timezone="Asia/Tokyo"):
     schedule = []
-    tokens = re.split(r"[\n/／、]+", timetable_text)
-    for tok in tokens:
-        s = tok.strip()
-        if not s:
+    current_day = None
+    location_only_re = re.compile(r"^[A-Z]{1,2}\d{1,2}(?:[-－]?\d{2,3}|\s+\d{2,3})$")
+    period_line_re = re.compile(r"^(?P<period>\d(?:-\d)?)\s+(?P<body>.+)$")
+    day_header_re = re.compile(r"^(?P<day>月曜日|月曜|月|火曜日|火曜|火|水曜日|水曜|水|木曜日|木曜|木|金曜日|金曜|金|土曜日|土曜|土|日曜日|日曜|日|Mon|Tue|Wed|Thu|Fri|Sat|Sun)")
+
+    def _day_to_en(day_str: str | None) -> str | None:
+        if not day_str:
+            return None
+        key = day_str[:3]
+        if day_str in DAY_JA_TO_EN:
+            return DAY_JA_TO_EN[day_str]
+        return DAY_JA_TO_EN.get(day_str[0]) or day_str[:1].upper() + day_str[1:3].lower()
+
+    lines = timetable_text.splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        line = raw.strip()
+        i += 1
+        if not line:
             continue
-        m = re.match(r"^(月|火|水|木|金|土|日)[曜]?:?\s*(\d)限\s+(.+)$", s)
+        day_match = day_header_re.match(line)
+        if day_match and len(line) <= 4:
+            current_day = _day_to_en(day_match.group("day"))
+            continue
+        if location_only_re.match(line):
+            if schedule and not schedule[-1].get("location"):
+                schedule[-1]["location"] = line.replace("  ", " ")
+            continue
+        period_match = period_line_re.match(line)
+        if period_match and current_day:
+            period_token = period_match.group("period")
+            body = period_match.group("body").strip()
+            start_period, end_period = period_token, period_token
+            if "-" in period_token:
+                start_period, end_period = period_token.split("-", 1)
+            start_info = DEFAULT_PERIOD_MAP.get(start_period)
+            end_info = DEFAULT_PERIOD_MAP.get(end_period)
+            if not start_info:
+                continue
+            start_hm = start_info["start"]
+            end_hm = end_info["end"] if end_info else start_info.get("end")
+            body_clean = re.sub(r"T[0-9A-Z]+", " ", body)
+            body_clean = re.sub(r"\d+単位", " ", body_clean)
+            body_clean = body_clean.replace("再履修", " ")
+            body_clean = body_clean.replace("授業毎に", " ").replace("授業中に", " ")
+            body_clean = re.sub(r"\s+", " ", body_clean).strip()
+            course_name, location = split_course_and_location(body_clean)
+            schedule.append({
+                "day": current_day,
+                "start": start_hm,
+                "end": end_hm,
+                "course": course_name.strip(),
+                "location": location,
+            })
+            continue
+        # fallback: explicit time ranges without day prefix
+        m = re.match(r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s*([0-2]?\d:[0-5]\d)\s*-\s*([0-2]?\d:[0-5]\d)\s+(.+)$", line, re.I)
         if m:
-            dja, period, course = m.groups()
-            en = DAY_JA_TO_EN.get(dja)
-            p = DEFAULT_PERIOD_MAP.get(period)
-            if en and p:
-                course_name, location = split_course_and_location(course)
-                schedule.append({"day": en, "start": p["start"], "end": p["end"], "course": course_name.strip(), "location": location})
+            day, start, end, course = m.groups()
+            day = day[:1].upper() + day[1:3].lower()
+            start = f"{int(start.split(':')[0]):02d}:{start.split(':')[1]}"
+            end = f"{int(end.split(':')[0]):02d}:{end.split(':')[1]}"
+            course_name, location = split_course_and_location(course)
+            schedule.append({"day": day, "start": start, "end": end, "course": course_name.strip(), "location": location})
             continue
-        m = re.match(r"^(月|火|水|木|金|土|日)[曜]?:?\s*([0-2]?\d:[0-5]\d)\s*-\s*([0-2]?\d:[0-5]\d)\s+(.+)$", s)
+        m = re.match(r"^(月|火|水|木|金|土|日)[曜]?:?\s*([0-2]?\d:[0-5]\d)\s*-\s*([0-2]?\d:[0-5]\d)\s+(.+)$", line)
         if m:
             dja, start, end, course = m.groups()
             en = DAY_JA_TO_EN.get(dja)
             if en:
                 start = f"{int(start.split(':')[0]):02d}:{start.split(':')[1]}"
-                end   = f"{int(end.split(':')[0]):02d}:{end.split(':')[1]}"
+                end = f"{int(end.split(':')[0]):02d}:{end.split(':')[1]}"
                 course_name, location = split_course_and_location(course)
                 schedule.append({"day": en, "start": start, "end": end, "course": course_name.strip(), "location": location})
-            continue
-        m = re.match(r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s*([0-2]?\d:[0-5]\d)\s*-\s*([0-2]?\d:[0-5]\d)\s+(.+)$", s, re.I)
-        if m:
-            day, start, end, course = m.groups()
-            day = day[:1].upper() + day[1:3].lower()
-            start = f"{int(start.split(':')[0]):02d}:{start.split(':')[1]}"
-            end   = f"{int(end.split(':')[0]):02d}:{end.split(':')[1]}"
-            course_name, location = split_course_and_location(course)
-            schedule.append({"day": day, "start": start, "end": end, "course": course_name.strip(), "location": location})
             continue
     return {"timezone": timezone, "schedule": schedule}
 
