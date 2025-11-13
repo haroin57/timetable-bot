@@ -43,6 +43,9 @@ DEFAULT_PERIOD_MAP = {
     "6": {"start": "18:00", "end": "19:30"},
 }
 
+DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
+DEFAULT_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", DEFAULT_OPENAI_MODEL)
+
 VIEW_COMMANDS = {"一覧", "確認", "時間割", "schedule", "list"}
 
 HELP_COMMANDS = {"help", "ヘルプ", "使い方"}
@@ -212,7 +215,7 @@ def parse_replacement_parts(body: str) -> tuple[str, str] | None:
             return left, right
     return None
 
-def call_chatgpt_to_extract_schedule(timetable_text: str, model="gpt-4o-mini", timezone="Asia/Tokyo"):
+def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_MODEL, timezone="Asia/Tokyo"):
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY が未設定です。")
@@ -269,7 +272,7 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model="gpt-4o-mini", t
     return data
 
 def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: str = "image/png",
-                                                model="gpt-4o-mini", timezone="Asia/Tokyo"):
+                                                model=DEFAULT_VISION_MODEL, timezone="Asia/Tokyo"):
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY が未設定です。")
@@ -590,7 +593,7 @@ def process_timetable_async(user_id: str, text: str, minutes_before: int):
     err = None
     try:
         schedule_data = call_chatgpt_to_extract_schedule(
-            text, model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"), timezone="Asia/Tokyo"
+            text, model=DEFAULT_OPENAI_MODEL, timezone="Asia/Tokyo"
         )
     except Exception as e:
         err = e
@@ -627,7 +630,7 @@ def process_image_timetable_async(user_id: str, message_id: str, minutes_before:
         schedule_data = call_chatgpt_to_extract_schedule_from_image(
             image_bytes,
             mime_type=mime_type,
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            model=DEFAULT_VISION_MODEL,
             timezone="Asia/Tokyo",
         )
     except Exception as e:
@@ -666,7 +669,7 @@ def process_correction_async(user_id: str, text: str):
                 try:
                     adds = call_chatgpt_to_extract_schedule(
                         body,
-                        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                        model=DEFAULT_OPENAI_MODEL,
                         timezone=current.get("timezone", "Asia/Tokyo"),
                     )
                 except Exception:
