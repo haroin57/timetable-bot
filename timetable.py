@@ -467,7 +467,9 @@ Guidelines:
 - Day must be Mon/Tue/Wed/Thu/Fri/Sat/Sun.
 - If the text shows "n限", map it using:
 {period_hint}
-- Use location strings as-is; if missing, output null.
+- Use classroom strings (e.g. "W1-101", "C3 201", "101教室") exactly in the location field. Never treat them as course names.
+- Course names must describe the lecture itself (e.g. "解析学", "情報セキュリティ") and must not include classroom codes.
+- If a classroom is missing, set location to null.
 
 Text:
 ---
@@ -525,7 +527,8 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
 - 出力はJSONのみ。前後に説明文やコードブロックは不要。
 - 時刻は24時間表記 "HH:MM"。
 - 曜日は "Mon","Tue","Wed","Thu","Fri","Sat","Sun" のいずれか。
-- locationは表に記載された教室表記（例: "C3 100", "W2-101", "101教室"）をそのまま入れる。見つからなければ null。
+- locationは表に記載された教室表記（例: "C3 100", "W2-101", "101教室"）をそのまま入れる。教室コードを科目名として扱ってはいけません。
+- course には授業名のみを入れ、教室コード・番号は含めないでください。
 - 日本語の「n限」は、以下のデフォルト対応を使って開始/終了を決めてください（本文中に別の時間が明記されていればそちらを優先）:
 {period_hint}
 
@@ -595,6 +598,7 @@ def call_chatgpt_to_extract_replacement(text: str, model=DEFAULT_OPENAI_MODEL, t
     user = f"""
 文章には「どの授業を」「どの授業に」置き換えるかが書かれています。
 24時間表記の時刻、Mon/Tue... の曜日、省略時は n限 を {period_hint} の対応で解釈してください。
+教室コード（例: W1-115, C3 201）は location にのみ記載し、course には絶対に含めないでください。
 JSONのみを返してください:
 {{
   "timezone": "{timezone}",
@@ -643,6 +647,7 @@ def call_chatgpt_to_extract_location_updates(text: str, model=DEFAULT_OPENAI_MOD
 文章には教室を変更したい授業と新しい教室名が書かれています。複数指定される場合もあります。
 曜日は Mon/Tue... または 月〜日、時刻は24時間表記に直し、n限は以下で換算してください:
 {period_hint}
+教室コード（例: W2-201, C3 101）は location にのみ記載し、course は授業名のみにしてください。
 出力フォーマット:
 {{
   "timezone": "{timezone}",
@@ -825,6 +830,23 @@ def load_states_from_db():
             except Exception as e:
                 print(f"ジョブ再登録に失敗しました(user_id={user_id}): {e}")
 
+
+def get_all_user_ids(force_db: bool = True) -> list[str]:
+    ids = set(USER_STATE.keys())
+    if force_db:
+        if DB_CONN is None:
+            try:
+                init_storage()
+            except Exception as e:
+                print(f"DB初期化に失敗しました(get_all_user_ids): {e}")
+        if DB_CONN:
+            try:
+                cur = DB_CONN.execute("SELECT user_id FROM user_state")
+                ids.update(row[0] for row in cur.fetchall())
+            except Exception as e:
+                print(f"user_stateテーブルからの読込に失敗しました: {e}")
+    return [user_id for user_id in ids if user_id]
+
 def persist_user_state(user_id: str):
     if DB_CONN is None:
         return
@@ -865,6 +887,31 @@ def summarize_schedule(schedule_data: dict, limit: int = 20) -> str:
     if len(schedule_data.get("schedule", [])) > limit:
         rows.append("…")
     return "\n".join(rows) if rows else "登録件数 0 件"
+
+
+def broadcast_message(text: str, delay: float = 0.1, reload_state: bool = True):
+    msg = (text or "").strip()
+    if not msg:
+        raise ValueError("送信するメッセージが空です。")
+    if reload_state:
+        if DB_CONN is None:
+            init_storage()
+        else:
+            load_states_from_db()
+    user_ids = get_all_user_ids(force_db=True)
+    if not user_ids:
+        print("送信対象のユーザーが見つかりませんでした。")
+        return
+    success = 0
+    for uid in user_ids:
+        try:
+            line_push_text(uid, msg)
+            success += 1
+            if delay:
+                time.sleep(delay)
+        except Exception as e:
+            print(f"[broadcast] 送信失敗 user={uid}: {e}")
+    print(f"[broadcast] 完了: {success}/{len(user_ids)} 件送信")
 
 # OpenAIが使えない場合の簡易パーサー（最低限の対応）
 DAY_JA_TO_EN = {"月":"Mon","火":"Tue","水":"Wed","木":"Thu","金":"Fri","土":"Sat","日":"Sun"}
@@ -1367,3 +1414,30 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
     return {"status": "ok"}
 
 
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Timetable bot management utilities")
+    parser.add_argument("--broadcast", type=str, help="全ユーザーへ送信するメッセージ")
+    parser.add_argument("--list-users", action="store_true", help="登録済みユーザーIDを一覧表示")
+    parser.add_argument("--no-delay", action="store_true", help="ブロードキャスト時のインターバルを省略")
+    args = parser.parse_args()
+
+    if args.list_users or args.broadcast:
+        init_storage()
+
+    if args.list_users:
+        ids = get_all_user_ids(force_db=True)
+        if not ids:
+            print("ユーザーが登録されていません。")
+        else:
+            print("登録ユーザーID:")
+            for uid in ids:
+                print(f" - {uid}")
+
+    if args.broadcast:
+        delay = 0.0 if args.no_delay else 0.1
+        broadcast_message(args.broadcast, delay=delay, reload_state=False)
+
+    if not args.list_users and not args.broadcast:
+        parser.print_help()
