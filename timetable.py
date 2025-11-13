@@ -287,11 +287,27 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
         "Read timetable screenshots (possibly Japanese) and output normalized JSON. "
         "Use only the schema and output JSON only with no extra text."
     )
+    period_hint = "\n".join([f"{k}限: {v['start']}–{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()])
+    user_text = f"""
+以下の画像には大学の時間割が写っています。日本語の「n限」「月〜金」などが含まれます。
+目的: 各授業の「曜日」「開始時刻」「終了時刻」「科目名」「教室」を抽出し、統一フォーマットのJSONで出力してください。
 
-    user_text = (
-        f"The attached image is a university timetable. Extract each class (day/start/end/course/location) and output JSON. "
-        f"Timezone: {timezone}."
-    )
+制約:
+- 出力はJSONのみ。前後に説明文やコードブロックは不要。
+- 時刻は24時間表記 "HH:MM"。
+- 曜日は "Mon","Tue","Wed","Thu","Fri","Sat","Sun" のいずれか。
+- locationは表に記載された教室表記（例: "C3 100", "W2-101", "101教室"）をそのまま入れる。見つからなければ null。
+- 日本語の「n限」は、以下のデフォルト対応を使って開始/終了を決めてください（本文中に別の時間が明記されていればそちらを優先）:
+{period_hint}
+
+スキーマ:
+{{
+  "timezone": "{timezone}",
+  "schedule": [
+    {{"day": "Mon", "start": "09:00", "end": "10:30", "course": "科目名", "location": "C3 100"}}
+  ]
+}}
+""".strip()
 
     client = OpenAI()
     resp = client.chat.completions.create(
@@ -309,16 +325,25 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
         ],
     )
     content = resp.choices[0].message.content
+
+    print("[vision raw content]", content, flush=True)  # Debug log
+
     if isinstance(content, list):
         parts = []
         for part in content:
             if isinstance(part, dict) and part.get("type") == "text":
                 parts.append(part.get("text", ""))
         content = "\n".join(parts)
+
     if not isinstance(content, str):
         raise ValueError(f"Unexpected content type: {type(content)}")
+    
+    print("[vision processed content]", content, flush=True)  # Debug log
 
     raw_json = extract_json_from_text(content)
+    
+    print("[vision extracted JSON]", raw_json, flush=True)  # Debug log
+
     data = normalize_schedule_response(json.loads(raw_json), timezone=timezone)
     for entry in data["schedule"]:
         entry.setdefault("location", None)
