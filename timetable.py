@@ -255,6 +255,7 @@ Text:
         ],
     )
     content = resp.choices[0].message.content
+    print(content)  # Debug log
     if isinstance(content, list):
         parts = []
         for part in content:
