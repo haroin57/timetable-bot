@@ -109,6 +109,21 @@ def extract_json_from_text(text: str) -> str:
             idx = text.find("{", idx + 1)
     raise ValueError("JSONっぽい部分を検出できませんでした。")
 
+def normalize_schedule_response(data, timezone="Asia/Tokyo"):
+    if isinstance(data, list):
+        data = {"timezone": timezone, "schedule": data}
+    elif isinstance(data, dict):
+        if "schedule" not in data:
+            for key in ("classes", "items", "entries", "timetable", "lessons"):
+                if isinstance(data.get(key), list):
+                    data["schedule"] = data[key]
+                    break
+        data.setdefault("timezone", timezone)
+    else:
+        raise ValueError("JSON形式を解釈できませんでした。")
+    data = ensure_schedule_dict(data)
+    return data
+
 LOCATION_HEAD_RE = re.compile(r"^[A-Z]{1,2}\d{1,2}$")
 LOCATION_COMBINED_RE = re.compile(r"^[A-Z]{1,2}\d{1,2}[-－]?\d{2,3}$")
 
@@ -248,9 +263,7 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model="gpt-4o-mini", t
     )
     content = resp.choices[0].message.content
     raw_json = extract_json_from_text(content)
-    data = json.loads(raw_json)
-    if "schedule" not in data or not isinstance(data["schedule"], list):
-        raise ValueError("JSONにschedule配列がありません。")
+    data = normalize_schedule_response(json.loads(raw_json), timezone=timezone)
     for entry in data["schedule"]:
         entry.setdefault("location", None)
     return data
@@ -292,9 +305,7 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
     )
     content = resp.choices[0].message.content
     raw_json = extract_json_from_text(content)
-    data = json.loads(raw_json)
-    if "schedule" not in data or not isinstance(data["schedule"], list):
-        raise ValueError("JSONにschedule配列がありません。")
+    data = normalize_schedule_response(json.loads(raw_json), timezone=timezone)
     for entry in data["schedule"]:
         entry.setdefault("location", None)
     return data
