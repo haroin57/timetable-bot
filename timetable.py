@@ -468,6 +468,7 @@ Guidelines:
 - If the text shows "n限", map it using:
 {period_hint}
 - Use location strings as-is; if missing, output null.
+- 長い授業コード（明らかに教室名でないようなもの）は location にしないでください。
 
 Text:
 ---
