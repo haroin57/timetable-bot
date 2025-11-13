@@ -315,7 +315,7 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
         ],
     )
     content = resp.choices[0].message.content
-    if isinstance(content, list):
+    print(f"Raw response content: {content}") # Debug log
     # text パートだけを連結
         parts = []
         for part in content:
@@ -636,6 +636,8 @@ def process_timetable_async(user_id: str, text: str, minutes_before: int):
     summarize_and_push(user_id, minutes_before, schedule_data, "時間割の登録が完了しました。内訳は以下です。誤りがあれば「追加」「削除」「置換」で修正できます。")
 
 def process_image_timetable_async(user_id: str, message_id: str, minutes_before: int):
+    print(f"[image] user={user_id} bytes={len(image_bytes)} mime={mime_type}") # Debug log
+
     try:
         image_bytes, mime_type = download_line_content(message_id)
     except Exception as e:
@@ -656,6 +658,7 @@ def process_image_timetable_async(user_id: str, message_id: str, minutes_before:
 
     if not schedule_data or not schedule_data.get("schedule"):
         line_push_text(user_id, f"画像から時間割を抽出できませんでした。{err or ''}".strip())
+        print(f"[image-error] user={user_id} err={err}")
         return
 
     schedule_jobs_for_user(user_id, schedule_data, minutes_before=minutes_before)
