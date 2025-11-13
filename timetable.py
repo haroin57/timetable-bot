@@ -64,7 +64,7 @@ CONFIRM_NEGATIVE_NORMALIZED = {s.lower() for s in CONFIRM_NEGATIVE}
 
 HELP_TEXT = (
 
-    "利用できる主なコマンド:\n"
+    "利用できる主なコマンド：\n"
 
     "・通知 10 … 通知タイミングを分単位で設定\n"
 
@@ -1359,7 +1359,8 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                 continue
         elif etype == "follow" and user_id:
             try:
-                line_push_text(user_id, "友だち追加ありがとうございます。時間割のテキストまたは画像を送ってください。時間割のテキストはかなり適当でも拾うようになっているので適当で大丈夫です。例: 月1限 解析学 / 火2限 英語\n修正は 追加 / 削除 / 置換 で指定できます。")
+                line_push_text(user_id, "友だち追加ありがとうございます。時間割のテキストまたは画像を送ってください。時間割のテキストはかなり適当でも拾うようになっているので適当で大丈夫です。例: 月1限 解析学 / 火2限 英語\n")
+                linme_push_text(user_id, HELP_TEXT)
             except Exception as e:
                 print(f"初回メッセージ送信失敗: {e}")
 
