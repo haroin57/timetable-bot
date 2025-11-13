@@ -51,6 +51,9 @@ VIEW_COMMANDS = {"一覧", "確認", "時間割", "schedule", "list"}
 HELP_COMMANDS = {"help", "ヘルプ", "使い方"}
 
 RESET_COMMANDS = {"リセット", "reset", "クリア", "clear"}
+ADD_COMMANDS = {"追加", "add"}
+DELETE_COMMANDS = {"削除", "delete"}
+REPLACE_COMMANDS = {"置換", "修正", "変更", "replace"}
 LOCATION_COMMANDS = {"教室", "場所", "location", "room"}
 CONFIRM_POSITIVE = {"はい", "はい。", "yes", "y", "ok", "了解", "うん", "実行", "承認"}
 CONFIRM_NEGATIVE = {"いいえ", "いいえ。", "no", "n", "やめる", "キャンセル", "不要"}
@@ -65,17 +68,13 @@ HELP_TEXT = (
 
     "・通知 10 … 通知タイミングを分単位で設定\n"
 
-    "・追加 月 1限 解析学 … 授業を追加\n"
-
-    "・削除 火 10:40-12:10 … 授業を削除\n"
-
-    "・置換 (1行目:変更前, 2行目以降:変更後)\n"
+    "・追加 / 削除 / 置換 / 教室 … キーワードだけ送信すると詳細入力モードになります。\n"
+    "  続けて授業名や時間を自由な文章で送ると GPT が解釈し、実行前に確認メッセージが届きます。\n"
+    "  直接「追加 月曜1限 解析学」などと書いても同じ処理を行います。\n"
 
     "・リセット … 登録済みの時間割をすべて削除\n"
 
     "・一覧 … 現在登録済みの時間割を表示\n"
-
-    "・教室 月 10:30 -> W2-101 … 条件に合う授業の教室をまとめて設定\n"
 
     "・各コマンド実行前には確認メッセージ（はい/いいえ）が届きます\n"
 
@@ -310,17 +309,19 @@ def replace_entry_with_pattern(base: dict, old_pattern: dict, new_entry: dict) -
     return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_list}, replaced
 
 
-def update_locations_with_patterns(base: dict, patterns: list[dict], location_text: str) -> tuple[dict, int]:
+def update_locations_with_entries(base: dict, entries: list[dict]) -> tuple[dict, int]:
     updated = 0
     new_list = []
-    for entry in base.get("schedule", []):
-        if any(entry_matches_pattern(entry, p) for p in patterns):
-            ne = dict(entry)
-            ne["location"] = location_text
-            new_list.append(ne)
-            updated += 1
-        else:
-            new_list.append(entry)
+    for existing in base.get("schedule", []):
+        updated_entry = dict(existing)
+        for target in entries:
+            if entry_matches_pattern(existing, target):
+                new_loc = (target.get("location") or "").strip()
+                if new_loc:
+                    updated_entry["location"] = new_loc
+                    updated += 1
+                break
+        new_list.append(updated_entry)
     return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_list}, updated
 
 
@@ -337,6 +338,30 @@ def clear_pending_action(user_id: str):
 def send_confirmation_prompt(user_id: str, header: str, summary: str):
     msg = f"{header}\n{summary}\nこの内容で実行しますか？\nはい / いいえ"
     line_push_text(user_id, msg)
+
+
+def set_pending_command(user_id: str, command_type: str):
+    state = ensure_user_state(user_id)
+    state["pending_command"] = command_type
+
+
+def clear_pending_command(user_id: str):
+    state = ensure_user_state(user_id)
+    state.pop("pending_command", None)
+
+
+COMMAND_GUIDANCE = {
+    "add": "追加したい授業を自由な文章で教えてください。（例）月曜1限の解析学を追加して、教室はC3 101。",
+    "delete": "削除したい授業を自由に記述してください。（例）火曜10:40-12:10の英語を削除。",
+    "replace": "どの授業をどの授業に置き換えるかを自由に書いてください。（例）月曜1限解析学を火曜2限英語に変更。",
+    "location": "教室を変更したい授業と新しい教室を自由に書いてください。（例）水曜3限情報セキュリティをW2-201に移動。",
+}
+
+
+def request_command_details(reply_token: str, user_id: str, command_type: str):
+    guidance = COMMAND_GUIDANCE.get(command_type, "内容を自由に入力してください。")
+    set_pending_command(user_id, command_type)
+    line_reply_text(reply_token, [f"{guidance}\nキャンセルしたい場合は「いいえ」または「キャンセル」と送ってください。"])
 
 def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_MODEL, timezone="Asia/Tokyo"):
     api_key = os.getenv("OPENAI_API_KEY")
@@ -470,6 +495,109 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
     data = normalize_schedule_response(json.loads(raw_json), timezone=timezone)
     for entry in data["schedule"]:
         entry.setdefault("location", None)
+    return data
+
+
+def call_chatgpt_to_extract_replacement(text: str, model=DEFAULT_OPENAI_MODEL, timezone="Asia/Tokyo"):
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY が未設定です。")
+    if OpenAI is None:
+        raise RuntimeError("openai ライブラリが見つかりません。pip install openai を実行してください。")
+
+    period_hint = "\n".join([f"{k}限: {v['start']}–{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()])
+    system = (
+        "You extract timetable replacement instructions. "
+        "Return JSON with keys 'timezone', 'old', 'new'. "
+        "Each of 'old' and 'new' must contain day/start/end/course/location (location may be null). "
+        "Output JSON only."
+    )
+    user = f"""
+文章には「どの授業を」「どの授業に」置き換えるかが書かれています。
+24時間表記の時刻、Mon/Tue... の曜日、省略時は n限 を {period_hint} の対応で解釈してください。
+JSONのみを返してください:
+{{
+  "timezone": "{timezone}",
+  "old": {{"day": "Mon", "start": "09:00", "end": "10:30", "course": "解析学", "location": null}},
+  "new": {{"day": "Tue", "start": "10:40", "end": "12:10", "course": "英語", "location": "C3 100"}}
+}}
+---
+{text}
+---
+""".strip()
+
+    client = OpenAI()
+    resp = client.chat.completions.create(
+        model=model,
+        temperature=0,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    )
+    content = resp.choices[0].message.content
+    if isinstance(content, list):
+        content = "\n".join(part.get("text", "") for part in content if isinstance(part, dict))
+    raw_json = extract_json_from_text(content)
+    data = json.loads(raw_json)
+    if "old" not in data or "new" not in data:
+        raise ValueError("old/new が含まれていない応答でした。")
+    data.setdefault("timezone", timezone)
+    return data
+
+
+def call_chatgpt_to_extract_location_updates(text: str, model=DEFAULT_OPENAI_MODEL, timezone="Asia/Tokyo"):
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY が未設定です。")
+    if OpenAI is None:
+        raise RuntimeError("openai ライブラリが見つかりません。pip install openai を実行してください。")
+
+    period_hint = "\n".join([f"{k}限: {v['start']}–{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()])
+    system = (
+        "You extract classroom update instructions from Japanese descriptions. "
+        "Return JSON with keys 'timezone' and 'updates'. "
+        "'updates' is a list of entries each containing day/start/end/course/location. "
+        "location must be the new classroom name. Output JSON only."
+    )
+    user = f"""
+文章には教室を変更したい授業と新しい教室名が書かれています。複数指定される場合もあります。
+曜日は Mon/Tue... または 月〜日、時刻は24時間表記に直し、n限は以下で換算してください:
+{period_hint}
+出力フォーマット:
+{{
+  "timezone": "{timezone}",
+  "updates": [
+    {{"day": "Mon", "start": "09:00", "end": "10:30", "course": "解析学", "location": "C3 101"}}
+  ]
+}}
+必ず JSON のみにしてください。
+---
+{text}
+---
+""".strip()
+
+    client = OpenAI()
+    resp = client.chat.completions.create(
+        model=model,
+        temperature=0,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    )
+    content = resp.choices[0].message.content
+    if isinstance(content, list):
+        content = "\n".join(part.get("text", "") for part in content if isinstance(part, dict))
+    raw_json = extract_json_from_text(content)
+    data = json.loads(raw_json)
+    data.setdefault("timezone", timezone)
+    updates = data.get("updates") or data.get("schedule")
+    if not updates:
+        raise ValueError("updates が空でした。")
+    for entry in updates:
+        entry.setdefault("location", None)
+    data["updates"] = updates
     return data
 
 
@@ -715,55 +843,6 @@ def merge_additions(base: dict, additions: dict) -> dict:
             keyset.add(k)
     return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": out}
 
-def entry_matches_filter(entry: dict, filt_text: str) -> bool:
-    filt = (filt_text or "").strip()
-    if not filt:
-        return False
-    if "限" in filt:
-        m = re.search(r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun|月|火|水|木|金|土|日).{0,2}(\d)限", filt, re.I)
-        if m:
-            d, p = m.groups()
-            d = DAY_JA_TO_EN.get(d, d.title()[:3])
-            want = DEFAULT_PERIOD_MAP.get(p)
-            if want:
-                return entry["day"] == d and entry["start"] == want["start"]
-    m = re.search(r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun|月|火|水|木|金|土|日).{0,2}([0-2]?\d:[0-5]\d)", filt, re.I)
-    if m:
-        d, hm = m.groups()
-        d = DAY_JA_TO_EN.get(d, d.title()[:3])
-        hm = f"{int(hm.split(':')[0]):02d}:{hm.split(':')[1]}"
-        return entry["day"] == d and entry["start"] == hm
-    if "教室" in filt and entry.get("location"):
-        return filt in entry["location"]
-    return filt in entry["course"] or (entry.get("location") and filt in entry["location"])
-
-
-def delete_by_filter(base: dict, filt_text: str) -> dict:
-    filt = (filt_text or "").strip()
-    new = [e for e in base.get("schedule", []) if not entry_matches_filter(e, filt)]
-    return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new}
-
-
-def update_locations_by_filter(base: dict, filt_text: str, location_text: str) -> tuple[dict, int]:
-    filt = (filt_text or "").strip()
-    location = (location_text or "").strip()
-    if not filt:
-        raise ValueError("教室を更新する対象が指定されていません。")
-    if not location:
-        raise ValueError("設定する教室名が空です。")
-
-    updated = 0
-    new_list = []
-    for e in base.get("schedule", []):
-        if entry_matches_filter(e, filt):
-            ne = dict(e)
-            ne["location"] = location
-            new_list.append(ne)
-            updated += 1
-        else:
-            new_list.append(e)
-    return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": new_list}, updated
-
 def summarize_and_push(user_id: str, minutes_before: int, schedule_data: dict, prefix: str):
     msg = f"{prefix}\n通知: {minutes_before}分前\n" + summarize_schedule(schedule_data)
     line_push_text(user_id, msg)
@@ -808,13 +887,13 @@ def execute_pending_action(user_id: str):
                 return
             prefix = "授業の置換が完了しました。"
         elif action_type == "location":
-            location_text = action.get("location")
-            new_sched, updated = update_locations_with_patterns(current, action.get("targets", []), location_text)
+            entries = action.get("entries") or action.get("targets", [])
+            new_sched, updated = update_locations_with_entries(current, entries)
             if not updated:
                 line_push_text(user_id, "教室を更新できる授業が見つかりませんでした。")
                 clear_pending_action(user_id)
                 return
-            prefix = f"{updated}件の授業の教室を「{location_text}」に更新しました。"
+            prefix = f"{updated}件の授業の教室を更新しました。"
         else:
             line_push_text(user_id, "未対応の操作種別です。")
             clear_pending_action(user_id)
@@ -942,27 +1021,18 @@ def prepare_delete_action(user_id: str, body: str):
 
 
 def prepare_replace_action(user_id: str, body: str):
-    parts = parse_replacement_parts(body)
-    if not parts:
-        line_push_text(user_id, "置換コマンドは「置換 旧情報 -> 新情報」の形式で入力してください。")
-        return
-    old_text, new_text = parts
     state = ensure_user_state(user_id)
     timezone = state["schedule"].get("timezone", "Asia/Tokyo")
     try:
-        old_parsed = parse_entries_with_gpt(old_text, timezone=timezone)
-        new_parsed = parse_entries_with_gpt(new_text, timezone=timezone)
+        parsed = call_chatgpt_to_extract_replacement(body, model=DEFAULT_OPENAI_MODEL, timezone=timezone)
     except Exception as e:
         line_push_text(user_id, f"置換内容の解析に失敗しました: {e}")
         return
-    if not old_parsed.get("schedule"):
-        line_push_text(user_id, "変更前の授業が解釈できませんでした。")
+    old_entry = parsed.get("old")
+    new_entry = parsed.get("new")
+    if not old_entry or not new_entry:
+        line_push_text(user_id, "変更前／変更後の情報が不足しています。")
         return
-    if not new_parsed.get("schedule"):
-        line_push_text(user_id, "変更後の授業が解釈できませんでした。")
-        return
-    old_entry = old_parsed["schedule"][0]
-    new_entry = new_parsed["schedule"][0]
     action = {"type": "replace", "old": old_entry, "new": new_entry}
     set_pending_action(user_id, action)
     summary = (
@@ -975,119 +1045,31 @@ def prepare_replace_action(user_id: str, body: str):
 
 
 def prepare_location_action(user_id: str, body: str):
-    parts = parse_replacement_parts(body)
-    if not parts:
-        line_push_text(user_id, "教室コマンドは「教室 条件 -> 新しい教室名」の形式で入力してください。")
-        return
-    target_text, location_text = parts
-    location_text = location_text.strip()
-    if not location_text:
-        line_push_text(user_id, "設定する教室名を指定してください。")
-        return
     state = ensure_user_state(user_id)
     timezone = state["schedule"].get("timezone", "Asia/Tokyo")
     try:
-        parsed = parse_entries_with_gpt(target_text, timezone=timezone)
+        parsed = call_chatgpt_to_extract_location_updates(body, model=DEFAULT_OPENAI_MODEL, timezone=timezone)
     except Exception as e:
-        line_push_text(user_id, f"教室更新対象の解析に失敗しました: {e}")
+        line_push_text(user_id, f"教室更新内容の解析に失敗しました: {e}")
         return
-    targets = parsed.get("schedule", [])
-    if not targets:
-        line_push_text(user_id, "教室を更新する対象授業が見つかりませんでした。")
+    updates = parsed.get("updates") or []
+    clean_updates = [u for u in updates if u.get("location")]
+    if not clean_updates:
+        line_push_text(user_id, "教室を設定できる情報が見つかりませんでした。教室名まで含めて記述してください。")
         return
-    action = {"type": "location", "targets": targets, "location": location_text}
+    action = {"type": "location", "entries": clean_updates}
     set_pending_action(user_id, action)
-    summary = format_entry_lines(targets) + f"\n設定予定の教室: {location_text}"
-    send_confirmation_prompt(user_id, "教室を更新する授業", summary)
+    summary = format_entry_lines(clean_updates)
+    send_confirmation_prompt(user_id, "教室を更新する授業", summary + "\n上記の授業を記載された教室に変更します。")
 
 
-def process_correction_async(user_id: str, text: str):
-    state = USER_STATE.get(user_id)
-    if not state or not state.get("schedule"):
-        line_push_text(user_id, "まだ時間割が登録されていません。まず時間割全体を送ってください。")
-        return
-    current = state["schedule"]
-    minutes_before = state.get("minutes_before", DEFAULT_MINUTES_BEFORE)
+COMMAND_PREPARE = {
+    "add": prepare_add_action,
+    "delete": prepare_delete_action,
+    "replace": prepare_replace_action,
+    "location": prepare_location_action,
+}
 
-    t = text.strip()
-    try:
-        add_body = extract_command_payload(t, "追加")
-        if add_body is not None:
-            body = add_body.strip()
-            if not body:
-                line_push_text(user_id, "追加 月 10:40-12:10 英語 のように入力してください。")
-                return
-            adds = parse_timetable_locally(body, timezone=current.get("timezone", "Asia/Tokyo"))
-            if not adds.get("schedule"):
-                try:
-                    adds = call_chatgpt_to_extract_schedule(
-                        body,
-                        model=DEFAULT_OPENAI_MODEL,
-                        timezone=current.get("timezone", "Asia/Tokyo"),
-                    )
-                except Exception:
-                    pass
-            if not adds.get("schedule"):
-                line_push_text(user_id, "追加の解析に失敗しました。例: 追加 火 10:40-12:10 英語")
-                return
-            new_sched = merge_additions(current, adds)
-        elif (delete_body := extract_command_payload(t, "削除")) is not None:
-            body = delete_body.strip()
-            if not body:
-                line_push_text(user_id, "削除 月 1限 解析学 のように入力してください。")
-                return
-            new_sched = delete_by_filter(current, body)
-        else:
-            replace_body = extract_command_payload(t, "置換")
-            if replace_body is None:
-                replace_body = extract_command_payload(t, "修正")
-            if replace_body is None:
-                line_push_text(user_id, "修正コマンドが認識できません。次のいずれかを使ってください: 追加 / 削除 / 置換")
-                return
-            body = replace_body.strip()
-            if not body:
-                line_push_text(user_id, "置換 コマンドは 1行目=変更前, 2行目以降=変更後 の形式で入力してください。")
-                return
-            parsed = parse_replacement_parts(body)
-            if not parsed:
-                line_push_text(user_id, "置換 コマンドは 1行目=変更前, 2行目以降=変更後 です。例:\n置換\n水 13:00-14:30 物理\n木 14:40-16:10 物理")
-                return
-            old, new = parsed
-            old_parsed = parse_timetable_locally(old, timezone=current.get("timezone", "Asia/Tokyo"))
-            new_parsed = parse_timetable_locally(new, timezone=current.get("timezone", "Asia/Tokyo"))
-            if not old_parsed.get("schedule") or not new_parsed.get("schedule"):
-                line_push_text(user_id, "置換の解析に失敗しました。例:\n置換\n水 13:00-14:30 物理\n木 14:40-16:10 物理")
-                return
-            o = old_parsed["schedule"][0]
-            n = new_parsed["schedule"][0]
-            replaced = False
-            new_list = []
-            for e in current.get("schedule", []):
-                if not replaced and ((e["day"] == o["day"] and e["start"] == o["start"]) or (o["course"] in e["course"])):
-                    new_list.append({
-                        "day": n["day"],
-                        "start": n["start"],
-                        "end": n.get("end"),
-                        "course": n["course"],
-                        "location": n.get("location"),
-                    })
-                    replaced = True
-                else:
-                    new_list.append(e)
-            if not replaced:
-                line_push_text(user_id, "対象が見つからず置換できませんでした。")
-                return
-            new_sched = {"timezone": current.get("timezone", "Asia/Tokyo"), "schedule": new_list}
-
-        schedule_jobs_for_user(user_id, new_sched, minutes_before=minutes_before)
-        state = ensure_user_state(user_id)
-        state["minutes_before"] = minutes_before
-        state["schedule"] = ensure_schedule_dict(new_sched)
-        state["updated_at"] = datetime.now()
-        persist_user_state(user_id)
-        summarize_and_push(user_id, minutes_before, new_sched, "修正を反映しました。最新の時間割は以下です。")
-    except Exception as e:
-        line_push_text(user_id, f"修正処理でエラーが発生しました: {e}")
 
 def _scheduler_loop():
     while True:
@@ -1139,6 +1121,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                 text = message.get("text", "").strip()
                 state = ensure_user_state(user_id)
                 pending_action = state.get("pending_action")
+                pending_command = state.get("pending_command")
                 normalized = text.lower()
 
                 if pending_action:
@@ -1152,6 +1135,20 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                             line_reply_text(reply_token, ["キャンセルできる操作はありません。"])
                     else:
                         line_reply_text(reply_token, ["保留中の操作があります。「はい」または「いいえ」で回答してください。"])
+                    continue
+
+                if pending_command:
+                    if normalized in CONFIRM_NEGATIVE_NORMALIZED:
+                        clear_pending_command(user_id)
+                        line_reply_text(reply_token, ["操作をキャンセルしました。"])
+                        continue
+                    handler = COMMAND_PREPARE.get(pending_command)
+                    clear_pending_command(user_id)
+                    if not handler:
+                        line_reply_text(reply_token, ["内部状態の処理に失敗しました。再度コマンドを送信してください。"])
+                        continue
+                    line_reply_text(reply_token, ["内容を解析しています。確認メッセージをお待ちください。"])
+                    background_tasks.add_task(handler, user_id, text)
                     continue
 
                 if text in HELP_COMMANDS:
@@ -1192,6 +1189,10 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                         line_reply_text(reply_token, ["通知 10 の形式で分数を指定してください。"])
                     continue
 
+                if text in LOCATION_COMMANDS:
+                    request_command_details(reply_token, user_id, "location")
+                    continue
+
                 location_payload = None
                 for keyword in LOCATION_COMMANDS:
                     payload = extract_command_payload(text, keyword)
@@ -1199,40 +1200,69 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                         location_payload = payload
                         break
                 if location_payload is not None:
-                    if not location_payload:
-                        line_reply_text(reply_token, ["新しく登録する教室と授業名を指定してください。例: 教室 解析学 101教室"])
+                    detail = location_payload.strip()
+                    if not detail:
+                        request_command_details(reply_token, user_id, "location")
                         continue
                     line_reply_text(reply_token, ["内容を解析しています。確認メッセージをお待ちください。"])
-                    background_tasks.add_task(prepare_location_action, user_id, location_payload)
+                    background_tasks.add_task(prepare_location_action, user_id, detail)
                     continue
 
-                add_payload = extract_command_payload(text, "追加")
+                if text in ADD_COMMANDS:
+                    request_command_details(reply_token, user_id, "add")
+                    continue
+
+                add_payload = None
+                for keyword in ADD_COMMANDS:
+                    payload = extract_command_payload(text, keyword)
+                    if payload is not None:
+                        add_payload = payload
+                        break
                 if add_payload is not None:
-                    if not add_payload:
-                        line_reply_text(reply_token, ["追加科目と時間を続けて入力してください。どんな形式でも解析を試みます。"])
+                    detail = add_payload.strip()
+                    if not detail:
+                        request_command_details(reply_token, user_id, "add")
                         continue
                     line_reply_text(reply_token, ["内容を解析しています。確認メッセージをお待ちください。"])
-                    background_tasks.add_task(prepare_add_action, user_id, add_payload)
+                    background_tasks.add_task(prepare_add_action, user_id, detail)
                     continue
 
-                delete_payload = extract_command_payload(text, "削除")
+                if text in DELETE_COMMANDS:
+                    request_command_details(reply_token, user_id, "delete")
+                    continue
+
+                delete_payload = None
+                for keyword in DELETE_COMMANDS:
+                    payload = extract_command_payload(text, keyword)
+                    if payload is not None:
+                        delete_payload = payload
+                        break
                 if delete_payload is not None:
-                    if not delete_payload:
-                        line_reply_text(reply_token, ["削除 月 1限 解析学 のように入力してください。"])
+                    detail = delete_payload.strip()
+                    if not detail:
+                        request_command_details(reply_token, user_id, "delete")
                         continue
                     line_reply_text(reply_token, ["内容を解析しています。確認メッセージをお待ちください。"])
-                    background_tasks.add_task(prepare_delete_action, user_id, delete_payload)
+                    background_tasks.add_task(prepare_delete_action, user_id, detail)
                     continue
 
-                replace_payload = extract_command_payload(text, "置換")
-                if replace_payload is None:
-                    replace_payload = extract_command_payload(text, "修正")
+                if text in REPLACE_COMMANDS:
+                    request_command_details(reply_token, user_id, "replace")
+                    continue
+
+                replace_payload = None
+                for keyword in REPLACE_COMMANDS:
+                    payload = extract_command_payload(text, keyword)
+                    if payload is not None:
+                        replace_payload = payload
+                        break
                 if replace_payload is not None:
-                    if not replace_payload:
-                        line_reply_text(reply_token, ["置換 コマンドは 1行目=変更前, 2行目以降=変更後 の形式で入力してください。"])
+                    detail = replace_payload.strip()
+                    if not detail:
+                        request_command_details(reply_token, user_id, "replace")
                         continue
                     line_reply_text(reply_token, ["内容を解析しています。確認メッセージをお待ちください。"])
-                    background_tasks.add_task(prepare_replace_action, user_id, replace_payload)
+                    background_tasks.add_task(prepare_replace_action, user_id, detail)
                     continue
 
                 minutes_before = ensure_user_state(user_id).get("minutes_before", DEFAULT_MINUTES_BEFORE)
