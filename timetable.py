@@ -495,7 +495,7 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_M
         ],
     )
     content = resp.choices[0].message.content
-    print(content)  # Debug log
+    print("[OpenAI schedule response]", content, flush=True)
     if isinstance(content, list):
         parts = []
         for part in content:
@@ -506,6 +506,7 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_M
         raise ValueError(f"Unexpected content type: {type(content)}")
 
     raw_json = extract_json_from_text(content)
+    print("[OpenAI schedule extracted JSON]", raw_json, flush=True)
     data = normalize_schedule_response(json.loads(raw_json), timezone=timezone)
     for entry in data["schedule"]:
         entry.setdefault("location", None)
@@ -635,9 +636,11 @@ def call_chatgpt_to_extract_replacement(text: str, model=DEFAULT_OPENAI_MODEL, t
         ],
     )
     content = resp.choices[0].message.content
+    print("[OpenAI replace response]", content, flush=True)
     if isinstance(content, list):
         content = "\n".join(part.get("text", "") for part in content if isinstance(part, dict))
     raw_json = extract_json_from_text(content)
+    print("[OpenAI replace extracted JSON]", raw_json, flush=True)
     data = json.loads(raw_json)
     if "old" not in data or "new" not in data:
         raise ValueError("old/new が含まれていない応答でした。")
@@ -686,9 +689,11 @@ def call_chatgpt_to_extract_location_updates(text: str, model=DEFAULT_OPENAI_MOD
         ],
     )
     content = resp.choices[0].message.content
+    print("[OpenAI location response]", content, flush=True)
     if isinstance(content, list):
         content = "\n".join(part.get("text", "") for part in content if isinstance(part, dict))
     raw_json = extract_json_from_text(content)
+    print("[OpenAI location extracted JSON]", raw_json, flush=True)
     data = json.loads(raw_json)
     data.setdefault("timezone", timezone)
     updates = data.get("updates") or data.get("schedule")
