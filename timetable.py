@@ -10,6 +10,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 import re
+import sqlite3
 
 import requests
 import schedule
@@ -41,6 +42,10 @@ DEFAULT_PERIOD_MAP = {
     "5": {"start": "16:20", "end": "17:50"},
     "6": {"start": "18:00", "end": "19:30"},
 }
+
+DB_PATH = os.getenv("USER_STATE_DB", os.path.join(os.getcwd(), "user_state.db"))
+DB_CONN: sqlite3.Connection | None = None
+DB_LOCK = threading.Lock()
 
 # ====== ユーティリティ ======
 def normalize_day(day_str: str) -> int:
@@ -197,6 +202,27 @@ LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 # ユーザーごとの状態保持（簡易版: メモリ）
 USER_STATE = {}  # user_id -> {"minutes_before": int, "schedule": dict, "updated_at": datetime}
 
+def _empty_schedule():
+    return {"timezone": "Asia/Tokyo", "schedule": []}
+
+def ensure_schedule_dict(data):
+    if not isinstance(data, dict):
+        return _empty_schedule()
+    data.setdefault("timezone", "Asia/Tokyo")
+    data.setdefault("schedule", [])
+    return data
+
+def ensure_user_state(user_id: str):
+    state = USER_STATE.get(user_id)
+    if not state:
+        state = {"minutes_before": DEFAULT_MINUTES_BEFORE, "schedule": _empty_schedule(), "updated_at": datetime.now()}
+        USER_STATE[user_id] = state
+    else:
+        state.setdefault("minutes_before", DEFAULT_MINUTES_BEFORE)
+        state["schedule"] = ensure_schedule_dict(state.get("schedule"))
+        state.setdefault("updated_at", datetime.now())
+    return state
+
 def verify_signature(body: bytes, signature: str) -> bool:
     if not LINE_SECRET:
         return False
@@ -250,6 +276,80 @@ def schedule_jobs_for_user(user_id: str, schedule_data: dict, minutes_before: in
             line_push_text, to_user_id=user_id, text=msg
         )
         print(f"ジョブ登録: user={user_id} {dow_attr} {notify_hm} {course}")
+
+def init_storage():
+    global DB_CONN
+    if DB_CONN:
+        return
+    try:
+        DB_CONN = sqlite3.connect(DB_PATH, check_same_thread=False)
+        DB_CONN.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_state (
+                user_id TEXT PRIMARY KEY,
+                minutes_before INTEGER NOT NULL,
+                schedule_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+        DB_CONN.commit()
+        load_states_from_db()
+        print(f"DB初期化完了: {DB_PATH}")
+    except Exception as e:
+        DB_CONN = None
+        print(f"DB初期化に失敗しました: {e}")
+
+def load_states_from_db():
+    if DB_CONN is None:
+        return
+    try:
+        cur = DB_CONN.execute("SELECT user_id, minutes_before, schedule_json, updated_at FROM user_state")
+    except Exception as e:
+        print(f"ユーザ状態の読込に失敗しました: {e}")
+        return
+    rows = cur.fetchall()
+    for user_id, minutes_before, schedule_json, updated_at in rows:
+        try:
+            schedule_data = json.loads(schedule_json)
+        except Exception as e:
+            print(f"schedule_jsonのパースに失敗しました(user_id={user_id}): {e}")
+            schedule_data = _empty_schedule()
+        state = {
+            "minutes_before": minutes_before if minutes_before is not None else DEFAULT_MINUTES_BEFORE,
+            "schedule": ensure_schedule_dict(schedule_data),
+            "updated_at": datetime.fromisoformat(updated_at) if updated_at else datetime.now(),
+        }
+        USER_STATE[user_id] = state
+        if state["schedule"].get("schedule"):
+            try:
+                schedule_jobs_for_user(user_id, state["schedule"], minutes_before=state["minutes_before"])
+            except Exception as e:
+                print(f"ジョブ再登録に失敗しました(user_id={user_id}): {e}")
+
+def persist_user_state(user_id: str):
+    if DB_CONN is None:
+        return
+    state = ensure_user_state(user_id)
+    schedule_data = ensure_schedule_dict(state.get("schedule"))
+    minutes_before = state.get("minutes_before", DEFAULT_MINUTES_BEFORE)
+    updated_at = datetime.now()
+    state["updated_at"] = updated_at
+    payload = json.dumps(schedule_data, ensure_ascii=False)
+    sql = """
+        INSERT INTO user_state (user_id, minutes_before, schedule_json, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            minutes_before=excluded.minutes_before,
+            schedule_json=excluded.schedule_json,
+            updated_at=excluded.updated_at
+    """
+    try:
+        with DB_LOCK:
+            DB_CONN.execute(sql, (user_id, minutes_before, payload, updated_at.isoformat()))
+            DB_CONN.commit()
+    except Exception as e:
+        print(f"user_stateの保存に失敗しました(user_id={user_id}): {e}")
 
 def summarize_schedule(schedule_data: dict, limit: int = 20) -> str:
     rows = []
@@ -366,7 +466,11 @@ def process_timetable_async(user_id: str, text: str, minutes_before: int):
     # 2) スケジュール登録
     schedule_jobs_for_user(user_id, schedule_data, minutes_before=minutes_before)
     # 3) 状態保存
-    USER_STATE[user_id] = {"minutes_before": minutes_before, "schedule": schedule_data, "updated_at": datetime.now()}
+    state = ensure_user_state(user_id)
+    state["minutes_before"] = minutes_before
+    state["schedule"] = ensure_schedule_dict(schedule_data)
+    state["updated_at"] = datetime.now()
+    persist_user_state(user_id)
     # 4) 完了通知 + 内訳
     summarize_and_push(user_id, minutes_before, schedule_data, "時間割の登録が完了しました。内訳は以下です。誤りがあれば「追加:」「削除:」「置換:」で修正できます。")
 
@@ -430,7 +534,11 @@ def process_correction_async(user_id: str, text: str):
 
         # 登録し直し + 状態更新
         schedule_jobs_for_user(user_id, new_sched, minutes_before=minutes_before)
-        USER_STATE[user_id] = {"minutes_before": minutes_before, "schedule": new_sched, "updated_at": datetime.now()}
+        state = ensure_user_state(user_id)
+        state["minutes_before"] = minutes_before
+        state["schedule"] = ensure_schedule_dict(new_sched)
+        state["updated_at"] = datetime.now()
+        persist_user_state(user_id)
         summarize_and_push(user_id, minutes_before, new_sched, "修正を反映しました。最新の時間割は以下です。")
     except Exception as e:
         line_push_text(user_id, f"修正処理でエラーが発生しました: {e}")
@@ -448,6 +556,7 @@ app = FastAPI()
 
 @app.on_event("startup")
 def _on_startup():
+    init_storage()
     th = threading.Thread(target=_scheduler_loop, daemon=True)
     th.start()
     print("Scheduler thread started.")
@@ -483,10 +592,9 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
             if text.startswith("通知:"):
                 try:
                     minutes_before = int(text.split(":", 1)[1].strip())
-                    st = USER_STATE.get(user_id, {})
+                    st = ensure_user_state(user_id)
                     st["minutes_before"] = minutes_before
-                    st.setdefault("schedule", {})
-                    USER_STATE[user_id] = st
+                    persist_user_state(user_id)
                     line_reply_text(reply_token, [f"通知タイミングを {minutes_before} 分前に設定しました。時間割テキストを送ってください。"])
                 except Exception:
                     line_reply_text(reply_token, ["通知:10 の形式で分数を指定してください。"])
@@ -499,7 +607,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                 continue
 
             # 新規登録: まず即時返信、処理は非同期
-            minutes_before = USER_STATE.get(user_id, {}).get("minutes_before", DEFAULT_MINUTES_BEFORE)
+            minutes_before = ensure_user_state(user_id).get("minutes_before", DEFAULT_MINUTES_BEFORE)
             line_reply_text(reply_token, ["入力を受けつけました。しばらくお待ちください。"])
             background_tasks.add_task(process_timetable_async, user_id, text, minutes_before)
 
