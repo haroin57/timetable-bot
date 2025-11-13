@@ -634,12 +634,13 @@ def process_timetable_async(user_id: str, text: str, minutes_before: int):
     summarize_and_push(user_id, minutes_before, schedule_data, "時間割の登録が完了しました。内訳は以下です。誤りがあれば「追加」「削除」「置換」で修正できます。")
 
 def process_image_timetable_async(user_id: str, message_id: str, minutes_before: int):
-    print(f"[image] user={user_id} bytes={len(image_bytes)} mime={mime_type}") # Debug log
 
     try:
         image_bytes, mime_type = download_line_content(message_id)
+        print(f"[image] user={user_id} bytes={len(image_bytes)} mime={mime_type}") # Debug log
     except Exception as e:
         line_push_text(user_id, f"画像のダウンロードに失敗しました: {e}")
+        print(f"[image] download failed: {e}")
         return
 
     schedule_data = None
