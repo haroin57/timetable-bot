@@ -396,7 +396,6 @@ Text:
     client = OpenAI()
     resp = client.chat.completions.create(
         model=model,
-        temperature=0,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -460,7 +459,6 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
     client = OpenAI()
     resp = client.chat.completions.create(
         model=model,
-        temperature=0,
         messages=[
             {"role": "system", "content": system},
             {
@@ -529,7 +527,6 @@ JSONのみを返してください:
     client = OpenAI()
     resp = client.chat.completions.create(
         model=model,
-        temperature=0,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -580,7 +577,6 @@ def call_chatgpt_to_extract_location_updates(text: str, model=DEFAULT_OPENAI_MOD
     client = OpenAI()
     resp = client.chat.completions.create(
         model=model,
-        temperature=0,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
