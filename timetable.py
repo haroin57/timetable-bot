@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dotenv import load_dotenv; load_dotenv()
 import os
@@ -557,32 +557,29 @@ def request_command_details(reply_token: str, user_id: str, command_type: str):
 def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_MODEL, timezone="Asia/Tokyo"):
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY が未設定です。")
+        raise RuntimeError("OPENAI_API_KEY は未設定です。")
     if OpenAI is None:
-        raise RuntimeError("openai ライブラリが見つかりません。pip install openai を実行してください。")
+        raise RuntimeError("openai モジュールがインストールされていません。pip install openai を実行してください。")
 
     period_hint = "\n".join(
         f"{k}限: {v['start']}~{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()
     )
 
     system = (
-        "あなたは厳密なJSON抽出器です。"
-        "大学の時間割テキスト（日本語を含む）から授業情報を抽出し、指定フォーマットのJSONのみを出力してください。"
+        "You are a strict JSON extractor for university timetables. "
+        "Always return a JSON object whose keys are timezone and schedule (schedule is an array of objects containing day/start/end/course/location). "
+        f"If no valid classes exist, respond with {{\"timezone\":\"{timezone}\",\"schedule\":[]}}. Never add explanations or code fences."
     )
     user = f"""
-以下の文章には大学の時間割が記載されています。各授業について次の項目を必ず含めてください。
-- day: Mon/Tue/Wed/Thu/Fri/Sat/Sun のいずれか
-- start, end: 24時間表記 HH:MM
-- course: 授業名のみ（Tから始まる7桁IDや「(16T以降)」などの注記は含めない）
-- location: 教室名・教室コード（例: C3 100, W1-115, 101教室）。教室が無い場合は null
-- Tから始まる7桁ID（例: T2043200）は授業コードなので JSON には一切出力しない
-
-「n限」表記は以下の対応で開始・終了時刻に変換してください（本文に具体的な時刻があればそちらを優先）。
+Extract every class from the following text and populate the schedule array.
+- day: Mon/Tue/Wed/Thu/Fri/Sat/Sun.
+- start/end: HH:MM (24h). When only 「n限」 is present, convert using these times:
 {period_hint}
+- course: class name only. Remove IDs such as T2043200 and any comments.
+- location: classroom name/code or null if missing.
+- Output must be a single JSON object matching the schema. Do NOT add commentary or wrapping.
 
-出力はJSONのみで、説明文やコードブロックは不要です。
-
-対象テキスト:
+Input text:
 ---
 {timetable_text}
 ---
@@ -600,7 +597,6 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_M
     )
     log_openai_response("schedule_text", resp)
     content = resp.choices[0].message.content
-    print(content)  # Debug log
     if isinstance(content, list):
         parts = []
         for part in content:
@@ -617,43 +613,31 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_M
     return data
 
 
-def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: str = "image/png",
-                                                model=DEFAULT_VISION_MODEL, timezone="Asia/Tokyo"):
+def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: str = "image/png", model=DEFAULT_VISION_MODEL, timezone="Asia/Tokyo"):
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY が未設定です。")
+        raise RuntimeError("OPENAI_API_KEY は未設定です。")
     if OpenAI is None:
-        raise RuntimeError("openai ライブラリが見つかりません。pip install openai を実行してください。")
+        raise RuntimeError("openai モジュールがインストールされていません。pip install openai を実行してください。")
 
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     data_url = f"data:{mime_type};base64,{b64}"
     system = (
-        "あなたは厳密な JSON 抽出器です。"
-        "時間割のスクリーンショット（日本語を含む）から授業情報を抽出し、指定フォーマットの JSON だけを出力してください。"
+        "You are a strict JSON extractor for timetable images. "
+        f"Always return a JSON object with timezone=\"{timezone}\" and schedule (array of day/start/end/course/location). "
+        f"If no classes are detected, respond with {{\"timezone\":\"{timezone}\",\"schedule\":[]}}. Never add explanations or code fences."
     )
     period_hint = "\n".join(
         f"{k}限: {v['start']}~{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()
     )
     user_text = f"""
-以下の画像には大学の時間割が写っています。各授業について曜日・開始時刻・終了時刻・授業名・教室を抽出し、統一フォーマットの JSON で出力してください。
-
-制約:
-- 出力は JSON のみ（説明文やコードブロックは禁止）
-- 時刻は 24 時間表記 HH:MM
-- 曜日は Mon/Tue/Wed/Thu/Fri/Sat/Sun
-- course には授業名のみ（Tから始まる7桁IDや「(16T以降)」などの注記は含めない）
-- location には教室表記（例: C3 100, W2-101, 101教室）のみを入れる。教室が無い場合は null
-- Tから始まる7桁ID（例: T2043200）は授業コードなので、JSON のどのフィールドにも出力しない
-- 「n限」表記は以下のデフォルト対応で開始・終了時刻に変換する（画像内に明示的な時刻があればそちらを優先）:
+The attached image contains a university timetable. Extract every class and populate the schedule array.
+- day/start/end/course/location must be present for each class.
+- day: Mon/Tue/Wed/Thu/Fri/Sat/Sun.
+- start/end: HH:MM. When only 「n限」 appears, use the mapping below unless explicit times are written.
 {period_hint}
-
-スキーマ:
-{{
-  "timezone": "{timezone}",
-  "schedule": [
-    {{"day": "Mon", "start": "09:00", "end": "10:30", "course": "科目名", "location": "C3 100"}}
-  ]
-}}
+- course: class name only. location: classroom name/code only. Return null if missing.
+- Output must be a single JSON object with the required schema.
 """.strip()
 
     messages = [
@@ -675,8 +659,6 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
     log_openai_response("schedule_image", resp)
     content = resp.choices[0].message.content
 
-    print("[vision raw content]", content, flush=True)  # Debug log
-
     if isinstance(content, list):
         parts = []
         for part in content:
@@ -686,13 +668,8 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
 
     if not isinstance(content, str):
         raise ValueError(f"Unexpected content type: {type(content)}")
-    
-    print("[vision processed content]", content, flush=True)  # Debug log
 
     raw_json = extract_json_from_text(content)
-    
-    print("[vision extracted JSON]", raw_json, flush=True)  # Debug log
-
     data = normalize_schedule_response(json.loads(raw_json), timezone=timezone)
     for entry in data["schedule"]:
         entry.setdefault("location", None)
@@ -702,36 +679,31 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
 def call_chatgpt_to_extract_replacement(text: str, model=DEFAULT_OPENAI_MODEL, timezone="Asia/Tokyo"):
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY が未設定です。")
+        raise RuntimeError("OPENAI_API_KEY は未設定です。")
     if OpenAI is None:
-        raise RuntimeError("openai ライブラリが見つかりません。pip install openai を実行してください。")
+        raise RuntimeError("openai モジュールがインストールされていません。pip install openai を実行してください。")
 
     period_hint = "\n".join(
         f"{k}限: {v['start']}~{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()
     )
     system = (
-        "あなたは時間割の置換指示を抽出するエージェントです。"
-        "timezone / old / new を含む JSON のみを出力してください。"
+        "You convert replacement instructions into JSON. "
+        "Return only a JSON object containing timezone and old/new objects (each with day/start/end/course/location). "
+        "Do not output explanations or code fences."
     )
     user = f"""
-文章にはどの授業をどの授業に置き換えるかが記載されています。
-- day は Mon/Tue/... の形
-- start,end は 24時間表記 HH:MM
-- course は授業名のみ（Tから始まる7桁IDや「(16T以降)」などの注記は除外）
-- location は教室名のみ（無ければ null）
-- Tから始まる7桁IDは JSON に出力しない
-
-「n限」表記は以下の対応で解釈してください（本文に具体的な時刻があればそちらを優先）:
+The following text describes which class should be replaced by another. Produce a JSON object with timezone and old/new entries that satisfy:
+- day: Mon/Tue/Wed/Thu/Fri/Sat/Sun.
+- start/end: HH:MM. When only 「n限」 is provided, map it as follows:
 {period_hint}
+- course: class name only. Remove IDs such as T2043200 and comments.
+- location: classroom name/code or null when unspecified.
+- Output must be valid JSON only.
 
-出力は JSON のみです。
-
-例:
-{
-  "timezone": "{timezone}",
-  "old": {"day": "Mon", "start": "09:00", "end": "10:30", "course": "解析学", "location": null},
-  "new": {"day": "Tue", "start": "10:40", "end": "12:10", "course": "英語", "location": "C3 100"}
-}
+Input text:
+---
+{text}
+---
 """.strip()
 
     messages = [
@@ -751,7 +723,7 @@ def call_chatgpt_to_extract_replacement(text: str, model=DEFAULT_OPENAI_MODEL, t
     raw_json = extract_json_from_text(content)
     data = json.loads(raw_json)
     if "old" not in data or "new" not in data:
-        raise ValueError("old/new が含まれていない応答でした。")
+        raise ValueError("old/new が見つかりません。")
     data.setdefault("timezone", timezone)
     return data
 
@@ -759,33 +731,31 @@ def call_chatgpt_to_extract_replacement(text: str, model=DEFAULT_OPENAI_MODEL, t
 def call_chatgpt_to_extract_location_updates(text: str, model=DEFAULT_OPENAI_MODEL, timezone="Asia/Tokyo"):
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY が未設定です。")
+        raise RuntimeError("OPENAI_API_KEY は未設定です。")
     if OpenAI is None:
-        raise RuntimeError("openai ライブラリが見つかりません。pip install openai を実行してください。")
+        raise RuntimeError("openai モジュールがインストールされていません。pip install openai を実行してください。")
 
     period_hint = "\n".join(
         f"{k}限: {v['start']}~{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()
     )
     system = (
-        "あなたは教室変更の指示を抽出するエージェントです。"
-        "timezone と updates を含む JSON のみを出力してください。"
+        "You convert classroom update requests into JSON. "
+        "Return only a JSON object containing timezone and updates (an array of day/start/end/course/location). "
+        "Do not output explanations or code fences."
     )
     user = f"""
-文章には教室を変更したい授業と新しい教室名が書かれています。複数指定される場合もあります。
-曜日は Mon/Tue... または 月/火...、時刻は 24時間表記 HH:MM に直してください。
-- course は授業名のみ（Tから始まる7桁IDや「(16T以降)」などの注記は除外）
-- location は教室名のみを入れ、Tから始まるIDは無視する
-
-「n限」表記は以下の対応で時刻に変換します（本文に具体的な時刻があればそちらを優先）:
+The following text describes existing classes and their updated classrooms. For each update, include day/start/end/course/location and follow these rules:
+- day: Mon/Tue/Wed/Thu/Fri/Sat/Sun.
+- start/end: HH:MM (24h). When only 「n限」 appears, convert using:
 {period_hint}
+- course: class name only. Remove IDs/comments.
+- location: classroom name/code; use null when missing or "未定".
+- Output must be a single JSON object with timezone and updates.
 
-出力フォーマット:
-{{
-  "timezone": "{timezone}",
-  "updates": [
-    {{"day": "Mon", "start": "09:00", "end": "10:30", "course": "解析学", "location": "C3 101"}}
-  ]
-}}
+Input text:
+---
+{text}
+---
 """.strip()
 
     messages = [
@@ -807,7 +777,7 @@ def call_chatgpt_to_extract_location_updates(text: str, model=DEFAULT_OPENAI_MOD
     data.setdefault("timezone", timezone)
     updates = data.get("updates") or data.get("schedule")
     if not updates:
-        raise ValueError("updates が空でした。")
+        raise ValueError("updates が見つかりません。")
     for entry in updates:
         entry.setdefault("location", None)
     data["updates"] = updates
@@ -817,34 +787,29 @@ def call_chatgpt_to_extract_location_updates(text: str, model=DEFAULT_OPENAI_MOD
 def call_chatgpt_to_extract_time_updates(text: str, model=DEFAULT_OPENAI_MODEL, timezone="Asia/Tokyo"):
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY が未設定です。")
+        raise RuntimeError("OPENAI_API_KEY は未設定です。")
     if OpenAI is None:
-        raise RuntimeError("openai ライブラリが見つかりません。pip install openai を実行してください。")
+        raise RuntimeError("openai モジュールがインストールされていません。pip install openai を実行してください。")
 
     period_hint = "\n".join(
         f"{k}限: {v['start']}~{v['end']}" for k, v in DEFAULT_PERIOD_MAP.items()
     )
     system = (
-        "あなたは授業時間の変更指示を抽出するエージェントです。"
-        "timezone と updates を含む JSON のみを出力してください。"
+        "You convert start/end time adjustment requests into JSON. "
+        "Return only a JSON object containing timezone and updates (array of objects with day/course/old_start/old_end/new_start/new_end)."
     )
     user = f"""
-文章には登録済み授業の開始・終了時刻をどのように変更したいかが書かれています。
-- day は Mon/Tue/... の形
-- course には授業名のみ（Tから始まる7桁IDや注記は除外）
-- new_start / new_end に新しい時刻（HH:MM）を入れる。終了時刻が不要なら省略可能
-- old_start / old_end には元の時刻が分かれば記載し、分からない場合は省略
-
-「n限」表記は以下の対応で時刻に変換してください（本文に具体的な時刻があればそちらを優先）:
+Extract every time change instruction from the text. For each entry, include day, course, old_start, old_end, new_start, new_end.
+- day: Mon/Tue/Wed/Thu/Fri/Sat/Sun.
+- course: class name only.
+- old/new times should be HH:MM. When the text only contains 「n限」, convert using:
 {period_hint}
+- Output must be strict JSON with timezone and updates only.
 
-出力例:
-{{
-  "timezone": "{timezone}",
-  "updates": [
-    {{"day": "Mon", "course": "解析学", "old_start": "09:00", "old_end": "10:30", "new_start": "10:40", "new_end": "12:10"}}
-  ]
-}}
+Input text:
+---
+{text}
+---
 """.strip()
 
     messages = [
@@ -857,7 +822,6 @@ def call_chatgpt_to_extract_time_updates(text: str, model=DEFAULT_OPENAI_MODEL, 
         model=model,
         messages=messages,
     )
-    log_openai_response("time", resp)
     log_openai_response("time", resp)
     content = resp.choices[0].message.content
     if isinstance(content, list):
@@ -880,6 +844,8 @@ def call_chatgpt_to_extract_time_updates(text: str, model=DEFAULT_OPENAI_MODEL, 
     return data
 
 
+# ====== LINE API / FastAPI Webhook (Unified with async + corrections) ======
+# ====== LINE API / FastAPI Webhook (Unified with async + corrections) ======
 # ====== LINE API / FastAPI Webhook (Unified with async + corrections) ======
 LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_SECRET = os.getenv("LINE_CHANNEL_SECRET")
@@ -980,6 +946,10 @@ def log_openai_response(label: str, resp):
         print(f"[openai meta] {label}: id={resp_id} model={model_name} usage={usage_dict}", flush=True)
     except Exception as exc:
         print(f"[openai response log error] {label}: {exc}", flush=True)
+
+
+def log_schedule_fallback(reason: str, raw_text: str):
+    print(f"[schedule fallback] reason={reason} text={_shorten_for_log(raw_text, 600)}", flush=True)
 
 
 def line_push_text(to_user_id: str, text: str):
@@ -1368,13 +1338,15 @@ def process_timetable_async(user_id: str, text: str, minutes_before: int):
     except Exception as e:
         err = e
     if not schedule_data or not schedule_data.get("schedule"):
+        log_schedule_fallback("empty_gpt_result", text)
         schedule_data = parse_timetable_locally(text, timezone="Asia/Tokyo")
         if not schedule_data.get("schedule"):
             line_push_text(user_id, f"時間割の解析に失敗しました。{err or ''}".strip())
             return
         else:
             line_push_text(user_id, "OpenAIの解析結果から授業を取得できなかったため、簡易解析で登録します。")
-    print(f"user_id={user_id}")
+            log_schedule_fallback("local_parser_used", text)
+    print(f"[schedule gpt parsed] user={user_id} entries={len(schedule_data.get('schedule', []))}", flush=True)
 
     # 2) スケジュール登録
     schedule_jobs_for_user(user_id, schedule_data, minutes_before=minutes_before)
@@ -1413,6 +1385,7 @@ def process_image_timetable_async(user_id: str, message_id: str, minutes_before:
         detail = str(err).strip() if err else "OpenAIの応答から授業が見つかりませんでした。"
         message = f"画像から時間割を抽出できませんでした。{detail}".strip()
         line_push_text(user_id, message)
+        log_schedule_fallback("image_empty_gpt_result", f"message_id={message_id}")
         try:
             raw_preview = json.dumps(schedule_data, ensure_ascii=False)[:500] if schedule_data else "None"
         except Exception:
@@ -1420,6 +1393,7 @@ def process_image_timetable_async(user_id: str, message_id: str, minutes_before:
         print(f"[image-error] user={user_id} detail={detail} raw={raw_preview}")
         return
 
+    print(f"[schedule gpt parsed:image] user={user_id} entries={len(schedule_data.get('schedule', []))}", flush=True)
     schedule_jobs_for_user(user_id, schedule_data, minutes_before=minutes_before)
     state = ensure_user_state(user_id)
     state["minutes_before"] = minutes_before
@@ -1477,6 +1451,11 @@ def prepare_replace_action(user_id: str, body: str):
         line_push_text(user_id, "変更前/変更後の情報が不足しているため実行できませんでした。")
         return
     action = {"type": "replace", "old": old_entry, "new": new_entry}
+    print(
+        f"[replace parsed] user={user_id} old={_shorten_for_log(json.dumps(old_entry, ensure_ascii=False))} "
+        f"new={_shorten_for_log(json.dumps(new_entry, ensure_ascii=False))}",
+        flush=True,
+    )
     set_pending_action(user_id, action)
     summary = (
         "変更前:\n"
@@ -1501,6 +1480,7 @@ def prepare_location_action(user_id: str, body: str):
         line_push_text(user_id, "教室の設定値が読み取れませんでした。もう一度書き直して送信してください。")
         return
     action = {"type": "location", "entries": clean_updates}
+    print(f"[location updates parsed] user={user_id} entries={len(clean_updates)} data={clean_updates}", flush=True)
     set_pending_action(user_id, action)
     summary = format_entry_lines(clean_updates)
     send_confirmation_prompt(user_id, "教室更新の内容", summary + "\n同じ授業名が複数あれば全てに適用されます。")
@@ -1517,9 +1497,11 @@ def prepare_time_action(user_id: str, body: str):
     updates = parsed.get("updates") or []
     clean_updates = [u for u in updates if u.get("new_start") or u.get("new_end")]
     if not clean_updates:
+        print(f"[time updates empty] user={user_id} raw={updates}", flush=True)
         line_push_text(user_id, "新しい開始/終了時刻が読み取れませんでした。別の書き方で送信してください。")
         return
     action = {"type": "time", "entries": clean_updates}
+    print(f"[time updates parsed] user={user_id} entries={len(clean_updates)} data={clean_updates}", flush=True)
     set_pending_action(user_id, action)
     summary = format_time_update_lines(clean_updates)
     send_confirmation_prompt(user_id, "時間変更の内容", summary)
