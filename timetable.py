@@ -80,6 +80,7 @@ DELETE_COMMANDS = {"削除", "delete"}
 REPLACE_COMMANDS = {"置換", "修正", "変更", "replace"}
 LOCATION_COMMANDS = {"教室", "場所", "location", "room"}
 TIME_COMMANDS = {"時間", "時間変更", "time", "時刻"}
+CANCEL_COMMANDS = {"キャンセル", "cancel", "中止", "やめる"}
 CONFIRM_POSITIVE = {"はい", "はい。", "yes", "y", "ok", "了解", "うん", "実行", "承認"}
 CONFIRM_NEGATIVE = {"いいえ", "いいえ。", "no", "n", "やめる", "キャンセル", "不要"}
 CONFIRM_POSITIVE_NORMALIZED = {s.lower() for s in CONFIRM_POSITIVE}
@@ -95,6 +96,7 @@ HELP_TEXT = (
     "  直接『追加 月曜1限 解析学』と書いても同じ処理を行います。\n\n"
     "・時間 … 登録済み授業の開始/終了時刻だけを変更します。\n"
     "  例: 『時間 月曜1限 解析学を10:40-12:10に変更』『時間 火曜最適化を9:30開始にしたい』\n\n"
+    "・キャンセル … 未確定の操作や入力モードをいつでも取り消します。\n\n"
     "・リセット … 登録済みの時間割をすべて削除\n\n"
     "・一覧 … 現在登録済みの時間割を表示\n\n"
     "・各コマンド実行前には確認メッセージ（はい/いいえ）が届きます\n\n"
@@ -1305,8 +1307,7 @@ def cancel_pending_action(user_id: str) -> bool:
         return True
     return False
 
-def process_timetable_async(user_id: str, text: str, minutes_before: int):
-    # 1) OpenAIで解析->失敗時は簡易パーサー
+def process_timetable(user_id: str, text: str, minutes_before: int) -> bool:
     schedule_data = None
     err = None
     try:
@@ -1321,32 +1322,26 @@ def process_timetable_async(user_id: str, text: str, minutes_before: int):
             detail = (str(err).strip() if err else "")
             if detail:
                 print(f"[schedule parse error] user={user_id} detail={detail}", flush=True)
-            line_push_text(user_id, "時間割の解析に失敗しました。もう一度お試しください。")
-            return
+            return False
         else:
             print(f"[schedule fallback parser] user={user_id}", flush=True)
-    print(f"user_id={user_id}")
 
-    # 2) スケジュール登録
     schedule_jobs_for_user(user_id, schedule_data, minutes_before=minutes_before)
-    # 3) 状態保存
     state = ensure_user_state(user_id)
     state["minutes_before"] = minutes_before
     state["schedule"] = ensure_schedule_dict(schedule_data)
     state["updated_at"] = datetime.now()
     persist_user_state(user_id)
-    # 4) 完了通知 + 内訳
     summarize_and_push(user_id, minutes_before, schedule_data, "時間割の登録が完了しました。内訳は以下です。誤りがあれば「追加」「削除」「置換」で修正できます。")
+    return True
 
-def process_image_timetable_async(user_id: str, message_id: str, minutes_before: int):
-
+def process_image_timetable(user_id: str, message_id: str, minutes_before: int) -> bool:
     try:
         image_bytes, mime_type = download_line_content(message_id)
-        print(f"[image] user={user_id} bytes={len(image_bytes)} mime={mime_type}") # Debug log
+        print(f"[image] user={user_id} bytes={len(image_bytes)} mime={mime_type}", flush=True)
     except Exception as e:
-        line_push_text(user_id, f"画像のダウンロードに失敗しました: {e}")
-        print(f"[image] download failed: {e}")
-        return
+        print(f"[image] download failed for user={user_id}: {e}", flush=True)
+        return False
 
     schedule_data = None
     err = None
@@ -1362,13 +1357,12 @@ def process_image_timetable_async(user_id: str, message_id: str, minutes_before:
 
     if not schedule_data or not schedule_data.get("schedule"):
         detail = str(err).strip() if err else "OpenAIの応答から授業が見つかりませんでした。"
-        line_push_text(user_id, "時間割の解析に失敗しました。もう一度お試しください。")
         try:
             raw_preview = json.dumps(schedule_data, ensure_ascii=False)[:500] if schedule_data else "None"
         except Exception:
             raw_preview = str(schedule_data)
-        print(f"[image-error] user={user_id} detail={detail} raw={raw_preview}")
-        return
+        print(f"[image-error] user={user_id} detail={detail} raw={raw_preview}", flush=True)
+        return False
 
     schedule_jobs_for_user(user_id, schedule_data, minutes_before=minutes_before)
     state = ensure_user_state(user_id)
@@ -1377,7 +1371,7 @@ def process_image_timetable_async(user_id: str, message_id: str, minutes_before:
     state["updated_at"] = datetime.now()
     persist_user_state(user_id)
     summarize_and_push(user_id, minutes_before, schedule_data, "画像から時間割を登録しました。内訳は以下です。")
-
+    return True
 
 def prepare_add_action(user_id: str, body: str):
     state = ensure_user_state(user_id)
@@ -1546,7 +1540,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                         else:
                             line_reply_text(reply_token, ["キャンセルできる操作はありません。"])
                     else:
-                        line_reply_text(reply_token, ["『はい』または『いいえ』で返信してください。"])
+                        line_reply_text(reply_token, ["「はい」または「いいえ」で返信してください。"])
                     continue
 
                 if pending_command:
@@ -1559,10 +1553,22 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     if not handler:
                         line_reply_text(reply_token, ["この操作は実行できません。もう一度コマンドを送信してください。"])
                         continue
-                    line_reply_text(reply_token, ["内容を受け付けました。完了後は「一覧」で確認してください。"])
-                    background_tasks.add_task(handler, user_id, text)
+                    line_reply_text(reply_token, ["内容を受け付けました。完了後は『一覧』で確認してください。"])
+                    handler(user_id, text)
                     continue
 
+                if text in CANCEL_COMMANDS:
+                    cancelled = False
+                    if cancel_pending_action(user_id):
+                        cancelled = True
+                    if state.get("pending_command"):
+                        clear_pending_command(user_id)
+                        cancelled = True
+                    if cancelled:
+                        line_reply_text(reply_token, ["キャンセルしました。"])
+                    else:
+                        line_reply_text(reply_token, ["キャンセルできる操作はありません。"])
+                    continue
 
                 if text in TIME_COMMANDS:
                     request_command_details(reply_token, user_id, "time")
@@ -1636,13 +1642,16 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     if not detail:
                         request_command_details(reply_token, user_id, "replace")
                         continue
-                    line_reply_text(reply_token, ["内容を受け付けました。解析完了後は「一覧」で確認できます。少々お待ちください。"])
+                    line_reply_text(reply_token, ["内容を受け付けました。完了後は「一覧」で確認してください。"])
                     background_tasks.add_task(prepare_replace_action, user_id, detail)
                     continue
 
                 minutes_before = ensure_user_state(user_id).get("minutes_before", DEFAULT_MINUTES_BEFORE)
-                line_reply_text(reply_token, ["時間割を受け付けました。解析が完了したら「一覧」と送信して登録内容をご確認ください。少々お待ちください。"])
-                background_tasks.add_task(process_timetable_async, user_id, text, minutes_before)
+                success = process_timetable(user_id, text, minutes_before)
+                if success:
+                    line_reply_text(reply_token, ["解析が完了しました。「一覧」と送信して登録内容をご確認ください。"])
+                else:
+                    line_reply_text(reply_token, ["解析がうまくいきませんでした。もう一度送信するか、キャンセルをしてください。"])
                 continue
 
             if msg_type == "image":
@@ -1651,15 +1660,18 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     line_reply_text(reply_token, ["画像IDを取得できませんでした。"])
                     continue
                 minutes_before = ensure_user_state(user_id).get("minutes_before", DEFAULT_MINUTES_BEFORE)
-                line_reply_text(reply_token, ["時間割を受け付けました。解析が完了したら「一覧」と送信して登録内容をご確認ください。少々お待ちください。"])
-                background_tasks.add_task(process_image_timetable_async, user_id, message_id, minutes_before)
+                success = process_image_timetable(user_id, message_id, minutes_before)
+                if success:
+                    line_reply_text(reply_token, ["解析が完了しました。「一覧」と送信して登録内容をご確認ください。"])
+                else:
+                    line_reply_text(reply_token, ["解析がうまくいきませんでした。もう一度送信するか、キャンセルをしてください。"])
                 continue
         elif etype == "follow" and user_id:
             try:
-                line_push_text(user_id, "友だち追加ありがとうございます。時間割のテキストまたは画像を送ってください。時間割のテキストはかなり適当でも拾うようになっているので適当で大丈夫です。例: 月1限 解析学 / 火2限 英語演習")
+                line_push_text(user_id, "友だち追加ありがとうございます。時間割のテキストまたは画像を送ってください。時間割のテキストは多少ラフでも対応できます。例: 月1限 解析学 / 火2限 英語演習")
                 line_push_text(user_id, HELP_TEXT)
             except Exception as e:
-                print(f"初回メッセージ送信失敗: {e}")
+                print(f"Followメッセージ送信失敗: {e}")
 
     return {"status": "ok"}
 
@@ -1669,8 +1681,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Timetable bot management utilities")
     parser.add_argument("--broadcast", type=str, help="全ユーザーへ送信するメッセージ")
-    parser.add_argument("--list-users", action="store_true", help="登録済みユーザーIDを一覧表示")
-    parser.add_argument("--no-delay", action="store_true", help="ブロードキャスト時のインターバルを省略")
+    parser.add_argument("--list-users", action="store_true", help="登録済みユーザーIDの一覧を表示")
+    parser.add_argument("--no-delay", action="store_true", help="ブロードキャスト時の待機をなくす")
     args = parser.parse_args()
 
     if args.list_users or args.broadcast:
@@ -1679,7 +1691,7 @@ if __name__ == "__main__":
     if args.list_users:
         ids = get_all_user_ids(force_db=True)
         if not ids:
-            print("ユーザーが登録されていません。")
+            print("ユーザーは登録されていません。")
         else:
             print("登録ユーザーID:")
             for uid in ids:
