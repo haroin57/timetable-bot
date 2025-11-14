@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dotenv import load_dotenv; load_dotenv()
 import os
@@ -11,41 +11,16 @@ import time
 from datetime import datetime, timedelta
 import re
 import sqlite3
-import uuid
 
 import requests
 import schedule
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
 
 try:
     from openai import OpenAI
 except ImportError:
     OpenAI = None
-
-
-def log_openai_response(label: str, resp):
-    try:
-        resp_id = getattr(resp, "id", None)
-        model = getattr(resp, "model", None)
-        usage = getattr(resp, "usage", None)
-        if hasattr(usage, "model_dump"):
-            usage_dict = usage.model_dump()
-        else:
-            usage_dict = usage
-        choice = resp.choices[0] if getattr(resp, "choices", None) else None
-        finish_reason = getattr(choice, "finish_reason", None) if choice else None
-        message = getattr(choice, "message", None) if choice else None
-        content = getattr(message, "content", None) if message else None
-        role = getattr(message, "role", None) if message else None
-    except Exception as exc:
-        print(f"[OpenAI {label} log failure] {exc}", flush=True)
-        return
-    print(f"[OpenAI {label}] id={resp_id} model={model} finish={finish_reason} usage={usage_dict}", flush=True)
-    if role is not None:
-        print(f"[OpenAI {label} role] {role}", flush=True)
-    if content is not None:
-        print(f"[OpenAI {label} content] {content}", flush=True)
 
 # ====== 設定 ======
 DEFAULT_MINUTES_BEFORE = int(os.getenv("DEFAULT_MINUTES_BEFORE", "10"))
@@ -70,10 +45,8 @@ DEFAULT_PERIOD_MAP = {
 
 DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 DEFAULT_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5-mini")
-REPLY_TOKEN_MAX_AGE = int(os.getenv("REPLY_TOKEN_MAX_AGE", "45"))
 
 VIEW_COMMANDS = {"一覧", "確認", "時間割", "schedule", "list"}
-VIEW_COMMANDS_NORMALIZED = {cmd.lower() for cmd in VIEW_COMMANDS}
 
 HELP_COMMANDS = {"help", "ヘルプ", "使い方"}
 
@@ -83,16 +56,10 @@ DELETE_COMMANDS = {"削除", "delete"}
 REPLACE_COMMANDS = {"置換", "修正", "変更", "replace"}
 LOCATION_COMMANDS = {"教室", "場所", "location", "room"}
 TIME_COMMANDS = {"時間", "時間変更", "time", "時刻"}
-CANCEL_COMMANDS = {"キャンセル", "cancel", "中止", "やめる"}
 CONFIRM_POSITIVE = {"はい", "はい。", "yes", "y", "ok", "了解", "うん", "実行", "承認"}
 CONFIRM_NEGATIVE = {"いいえ", "いいえ。", "no", "n", "やめる", "キャンセル", "不要"}
 CONFIRM_POSITIVE_NORMALIZED = {s.lower() for s in CONFIRM_POSITIVE}
 CONFIRM_NEGATIVE_NORMALIZED = {s.lower() for s in CONFIRM_NEGATIVE}
-
-SCHEDULE_SUCCESS_REPLY = "時間割の登録が完了しました。登録した時間割は「一覧」で確認してください。"
-SCHEDULE_FAILURE_REPLY = "時間割の解析に失敗しました。解析がうまくいかなかった場合は、もう一度送信するか「キャンセル」と送信してください。"
-SCHEDULE_CANCEL_REPLY = "時間割の解析をキャンセルしました。再登録する場合は、あらためて時間割を送信してください。"
-SCHEDULE_BUSY_REPLY = "時間割の解析を実行中です。完了までお待ちいただくか、「キャンセル」と送って中止してください。"
 
 
 
@@ -104,7 +71,6 @@ HELP_TEXT = (
     "  直接『追加 月曜1限 解析学』と書いても同じ処理を行います。\n\n"
     "・時間 … 登録済み授業の開始/終了時刻だけを変更します。\n"
     "  例: 『時間 月曜1限 解析学を10:40-12:10に変更』『時間 火曜最適化を9:30開始にしたい』\n\n"
-    "・キャンセル … 未確定の操作や入力モードをいつでも取り消します。\n\n"
     "・リセット … 登録済みの時間割をすべて削除\n\n"
     "・一覧 … 現在登録済みの時間割を表示\n\n"
     "・各コマンド実行前には確認メッセージ（はい/いいえ）が届きます\n\n"
@@ -567,38 +533,6 @@ def clear_pending_command(user_id: str):
     state = ensure_user_state(user_id)
     state.pop("pending_command", None)
 
-def get_pending_schedule_job(user_id: str) -> dict | None:
-    state = ensure_user_state(user_id)
-    return state.get("pending_schedule_job")
-
-
-def set_pending_schedule_job(user_id: str, job: dict):
-    state = ensure_user_state(user_id)
-    state["pending_schedule_job"] = job
-
-
-def clear_pending_schedule_job(user_id: str):
-    state = ensure_user_state(user_id)
-    state.pop("pending_schedule_job", None)
-
-
-def mark_schedule_job_cancelled(user_id: str) -> bool:
-    job = get_pending_schedule_job(user_id)
-    if job and not job.get("cancelled"):
-        job["cancelled"] = True
-        return True
-    return bool(job and job.get("cancelled"))
-
-
-def is_schedule_job_cancelled(user_id: str, job_id: str) -> bool:
-    job = get_pending_schedule_job(user_id)
-    if not job or job.get("id") != job_id:
-        return True
-    return bool(job.get("cancelled"))
-
-def start_schedule_job_thread(user_id: str, job_id: str):
-    threading.Thread(target=run_schedule_job, args=(user_id, job_id), daemon=True).start()
-
 
 COMMAND_GUIDANCE = {
     "add": "追加したい授業を自由な文章で教えてください。（例）月曜1限の解析学を追加して、教室はC3 101。",
@@ -974,31 +908,19 @@ def line_push_text(to_user_id: str, text: str):
         raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が未設定です。")
     headers = {"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"}
     body = {"to": to_user_id, "messages": [{"type": "text", "text": text[:2000]}]}
-    try:
-        r = requests.post(LINE_PUSH_URL, headers=headers, data=json.dumps(body), timeout=15)
-    except Exception as exc:
-        print(f"[line push error] user={to_user_id} error={exc}", flush=True)
-        return False
+    r = requests.post(LINE_PUSH_URL, headers=headers, data=json.dumps(body), timeout=15)
     if r.status_code >= 300:
-        print(f"[line push error] user={to_user_id} status={r.status_code} body={r.text}", flush=True)
-        return False
-    return True
+        raise RuntimeError(f"LINE Push失敗: {r.status_code} {r.text}")
 
-def line_reply_text(reply_token: str, texts) -> bool:
+def line_reply_text(reply_token: str, texts):
     if not LINE_TOKEN:
         raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が未設定です。")
     headers = {"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"}
     msgs = [{"type": "text", "text": str(t)[:2000]} for t in (texts if isinstance(texts, list) else [texts])]
     body = {"replyToken": reply_token, "messages": msgs}
-    try:
-        r = requests.post(LINE_REPLY_URL, headers=headers, data=json.dumps(body), timeout=15)
-    except Exception as exc:
-        print(f"LINE Reply送信エラー: {exc}", flush=True)
-        return False
+    r = requests.post(LINE_REPLY_URL, headers=headers, data=json.dumps(body), timeout=15)
     if r.status_code >= 300:
-        print(f"LINE Reply失敗: {r.status_code} {r.text}", flush=True)
-        return False
-    return True
+        print(f"LINE Reply失敗: {r.status_code} {r.text}")
 
 def download_line_content(message_id: str) -> tuple[bytes, str]:
     if not LINE_TOKEN:
@@ -1009,39 +931,7 @@ def download_line_content(message_id: str) -> tuple[bytes, str]:
     if r.status_code >= 300:
         raise RuntimeError(f"LINE Content取得失敗: {r.status_code} {r.text}")
     mime = r.headers.get("Content-Type", "application/octet-stream")
-
     return r.content, mime
-
-
-
-def send_reply_or_push(user_id: str, reply_token: str | None, created_at: float | None, texts) -> None:
-    messages = texts if isinstance(texts, list) else [texts]
-    if not messages:
-        return
-
-    should_reply = False
-    if reply_token:
-        age = time.time() - created_at if created_at else 0
-        if not created_at or age <= REPLY_TOKEN_MAX_AGE:
-            should_reply = True
-        else:
-            print(
-                f"[schedule reply fallback] reply token too old ({age:.1f}s), using push for user={user_id}",
-                flush=True,
-            )
-
-    if should_reply and line_reply_text(reply_token, messages):
-        return
-    if should_reply:
-        print(f"[schedule reply fallback] reply token invalid for user={user_id}, falling back to push", flush=True)
-
-    text_msg = "\n".join(str(m) for m in messages)
-    try:
-        if not line_push_text(user_id, text_msg):
-            print(f"[schedule reply fallback] push failed for user={user_id}", flush=True)
-    except Exception as exc:
-        print(f"[schedule reply fallback] exception user={user_id}: {exc}", flush=True)
-
 
 # 既存のschedule_jobs_for_userがなければ以下の関数で差し替え
 def schedule_jobs_for_user(user_id: str, schedule_data: dict, minutes_before: int = DEFAULT_MINUTES_BEFORE):
@@ -1179,22 +1069,6 @@ def summarize_schedule(schedule_data: dict, limit: int = 20) -> str:
         rows.append("…")
     return "\n".join(rows) if rows else "登録件数 0 件"
 
-
-
-def reply_current_schedule(reply_token: str, user_id: str):
-    state = ensure_user_state(user_id)
-    schedule_data = state.get("schedule") or _empty_schedule()
-    entries = schedule_data.get("schedule", [])
-    pending_job = get_pending_schedule_job(user_id)
-    if not entries:
-        msg = "まだ時間割が登録されていません。テキストか画像で送信すると解析できます。"
-    else:
-        minutes_before = state.get("minutes_before", DEFAULT_MINUTES_BEFORE)
-        summary = summarize_schedule(schedule_data, limit=50)
-        msg = f"登録済みの時間割は以下のとおりです。\n通知: {minutes_before}分前\n{summary}"
-        if pending_job:
-            msg += "\n（現在解析中の内容が反映されるまで少し時間がかかる場合があります）"
-    line_reply_text(reply_token, [msg])
 
 def broadcast_message(text: str, delay: float = 0.1, reload_state: bool = True):
     msg = (text or "").strip()
@@ -1401,7 +1275,8 @@ def cancel_pending_action(user_id: str) -> bool:
         return True
     return False
 
-def process_timetable(user_id: str, text: str, minutes_before: int, cancel_checker: callable | None = None) -> str:
+def process_timetable_async(user_id: str, text: str, minutes_before: int):
+    # 1) OpenAIで解析->失敗時は簡易パーサー
     schedule_data = None
     err = None
     try:
@@ -1410,36 +1285,35 @@ def process_timetable(user_id: str, text: str, minutes_before: int, cancel_check
         )
     except Exception as e:
         err = e
-    if cancel_checker and cancel_checker():
-        return "cancelled"
     if not schedule_data or not schedule_data.get("schedule"):
         schedule_data = parse_timetable_locally(text, timezone="Asia/Tokyo")
         if not schedule_data.get("schedule"):
-            detail = (str(err).strip() if err else "")
-            if detail:
-                print(f"[schedule parse error] user={user_id} detail={detail}", flush=True)
-            return "error"
-        print(f"[schedule fallback parser] user={user_id}", flush=True)
-    if cancel_checker and cancel_checker():
-        print(f"[schedule job cancelled] user={user_id}", flush=True)
-        return "cancelled"
+            line_push_text(user_id, f"時間割の解析に失敗しました。{err or ''}".strip())
+            return
+        else:
+            line_push_text(user_id, "OpenAIの解析結果から授業を取得できなかったため、簡易解析で登録します。")
+    print(f"user_id={user_id}")
 
+    # 2) スケジュール登録
     schedule_jobs_for_user(user_id, schedule_data, minutes_before=minutes_before)
+    # 3) 状態保存
     state = ensure_user_state(user_id)
     state["minutes_before"] = minutes_before
     state["schedule"] = ensure_schedule_dict(schedule_data)
     state["updated_at"] = datetime.now()
     persist_user_state(user_id)
-    summarize_and_push(user_id, minutes_before, schedule_data, "時間割の登録が完了しました。内容は以下です。誤りがあれば「追加」「削除」「置換」で修正できます。")
-    return "success"
+    # 4) 完了通知 + 内訳
+    summarize_and_push(user_id, minutes_before, schedule_data, "時間割の登録が完了しました。内訳は以下です。誤りがあれば「追加」「削除」「置換」で修正できます。")
 
-def process_image_timetable(user_id: str, message_id: str, minutes_before: int, cancel_checker: callable | None = None) -> str:
+def process_image_timetable_async(user_id: str, message_id: str, minutes_before: int):
+
     try:
         image_bytes, mime_type = download_line_content(message_id)
-        print(f"[image] user={user_id} bytes={len(image_bytes)} mime={mime_type}", flush=True)
+        print(f"[image] user={user_id} bytes={len(image_bytes)} mime={mime_type}") # Debug log
     except Exception as e:
-        print(f"[image] download failed for user={user_id}: {e}", flush=True)
-        return "error"
+        line_push_text(user_id, f"画像のダウンロードに失敗しました: {e}")
+        print(f"[image] download failed: {e}")
+        return
 
     schedule_data = None
     err = None
@@ -1452,69 +1326,26 @@ def process_image_timetable(user_id: str, message_id: str, minutes_before: int, 
         )
     except Exception as e:
         err = e
-    if cancel_checker and cancel_checker():
-        return "cancelled"
 
     if not schedule_data or not schedule_data.get("schedule"):
-        detail = str(err).strip() if err else "OpenAIの解析結果から授業を取得できませんでした。"
+        detail = str(err).strip() if err else "OpenAIの応答から授業が見つかりませんでした。"
+        message = f"画像から時間割を抽出できませんでした。{detail}".strip()
+        line_push_text(user_id, message)
         try:
             raw_preview = json.dumps(schedule_data, ensure_ascii=False)[:500] if schedule_data else "None"
         except Exception:
             raw_preview = str(schedule_data)
-        print(f"[image-error] user={user_id} detail={detail} raw={raw_preview}", flush=True)
-        return "error"
+        print(f"[image-error] user={user_id} detail={detail} raw={raw_preview}")
+        return
 
-    if cancel_checker and cancel_checker():
-        print(f"[schedule job cancelled:image] user={user_id}", flush=True)
-        return "cancelled"
     schedule_jobs_for_user(user_id, schedule_data, minutes_before=minutes_before)
     state = ensure_user_state(user_id)
     state["minutes_before"] = minutes_before
     state["schedule"] = ensure_schedule_dict(schedule_data)
     state["updated_at"] = datetime.now()
     persist_user_state(user_id)
-    summarize_and_push(user_id, minutes_before, schedule_data, "画像から時間割を登録しました。内容は以下です。")
-    return "success"
+    summarize_and_push(user_id, minutes_before, schedule_data, "画像から時間割を登録しました。内訳は以下です。")
 
-
-def finalize_schedule_job_reply(user_id: str, job_id: str, result: str):
-    job = get_pending_schedule_job(user_id)
-    if not job or job.get("id") != job_id:
-        return
-    reply_token = job.get("reply_token")
-    created_at = job.get("created_at") or 0
-    clear_pending_schedule_job(user_id)
-    if result == "cancelled":
-        msg = SCHEDULE_CANCEL_REPLY
-    elif result == "success":
-        msg = SCHEDULE_SUCCESS_REPLY
-    else:
-        msg = SCHEDULE_FAILURE_REPLY
-    send_reply_or_push(user_id, reply_token, created_at, [msg])
-
-
-def run_schedule_job(user_id: str, job_id: str):
-    job = get_pending_schedule_job(user_id)
-    if not job or job.get("id") != job_id:
-        return
-    job["status"] = "running"
-    minutes_before = job.get("minutes_before", DEFAULT_MINUTES_BEFORE)
-
-    def _cancel_checker():
-        return is_schedule_job_cancelled(user_id, job_id)
-
-    result = "error"
-    try:
-        if job.get("type") == "text":
-            payload = job.get("payload", "")
-            result = process_timetable(user_id, payload, minutes_before, cancel_checker=_cancel_checker)
-        elif job.get("type") == "image":
-            message_id = job.get("message_id")
-            result = process_image_timetable(user_id, message_id, minutes_before, cancel_checker=_cancel_checker)
-    except Exception as exc:
-        print(f"[schedule job error] user={user_id} job={job_id} error={exc}", flush=True)
-        result = "error"
-    finalize_schedule_job_reply(user_id, job_id, result)
 
 def prepare_add_action(user_id: str, body: str):
     state = ensure_user_state(user_id)
@@ -1628,6 +1459,7 @@ def _scheduler_loop():
             print(f"scheduleエラー: {e}")
         time.sleep(1)
 
+from fastapi import BackgroundTasks
 app = FastAPI()
 
 @app.on_event("startup")
@@ -1674,43 +1506,8 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
 
                 if pending_action:
                     if normalized in CONFIRM_POSITIVE_NORMALIZED:
-                        line_reply_text(reply_token, ["了解しました。実行します。"])
-                        execute_pending_action(user_id)
-                    elif normalized in CONFIRM_NEGATIVE_NORMALIZED:
-                        if cancel_pending_action(user_id):
-                            line_reply_text(reply_token, ["キャンセルしました。"])
-                        else:
-                            line_reply_text(reply_token, ["キャンセルできる操作はありません。"])
-                    else:
-                        line_reply_text(reply_token, ["「はい」または「いいえ」で返信してください。"])
-                    continue
-
-                if pending_command:
-                    if normalized in CONFIRM_NEGATIVE_NORMALIZED:
-                        clear_pending_command(user_id)
-                        line_reply_text(reply_token, ["キャンセルしました。"])
-                        continue
-                    handler = COMMAND_PREPARE.get(pending_command)
-                    clear_pending_command(user_id)
-                    if not handler:
-                        line_reply_text(reply_token, ["この操作は実行できません。もう一度コマンドを送信してください。"])
-                        continue
-                    handler(user_id, text)
-                    continue
-
-                if text in CANCEL_COMMANDS:
-                    messages = []
-                    if cancel_pending_action(user_id):
-                        messages.append("保留中の操作をキャンセルしました。")
-                    if state.get("pending_command"):
-                        clear_pending_command(user_id)
-                        messages.append("入力待ちのコマンドをキャンセルしました。")
-                    if mark_schedule_job_cancelled(user_id):
-                        messages.append("送信済みの時間割の解析をキャンセルします。処理完了まで少しお待ちください。")
-                    if messages:
-                        line_reply_text(reply_token, ["\n".join(messages)])
-                    else:
-                        line_reply_text(reply_token, ["キャンセルできる対象がありません。"])
+                                            line_reply_text(reply_token, ["内容を送信しました。確認メッセージをお待ちください。"])
+                    background_tasks.add_task(prepare_location_action, user_id, detail)
                     continue
 
                 if text in TIME_COMMANDS:
@@ -1728,6 +1525,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     if not detail:
                         request_command_details(reply_token, user_id, "time")
                         continue
+                    line_reply_text(reply_token, ["内容を送信しました。確認メッセージをお待ちください。"])
                     background_tasks.add_task(prepare_time_action, user_id, detail)
                     continue
 
@@ -1746,6 +1544,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     if not detail:
                         request_command_details(reply_token, user_id, "add")
                         continue
+                    line_reply_text(reply_token, ["内容を受け付けました。登録完了までお待ち下さい。登録内容を確認する場合は「一覧」と送信して確認してください。"])
                     background_tasks.add_task(prepare_add_action, user_id, detail)
                     continue
 
@@ -1764,6 +1563,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     if not detail:
                         request_command_details(reply_token, user_id, "delete")
                         continue
+                    line_reply_text(reply_token, ["内容を受け付けました。登録完了までお待ち下さい。登録内容を確認する場合は「一覧」と送信して確認してください。"])
                     background_tasks.add_task(prepare_delete_action, user_id, detail)
                     continue
 
@@ -1782,31 +1582,13 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     if not detail:
                         request_command_details(reply_token, user_id, "replace")
                         continue
+                    line_reply_text(reply_token, ["内容を受け付けました。解析完了後は「一覧」で確認できます。少々お待ちください。"])
                     background_tasks.add_task(prepare_replace_action, user_id, detail)
                     continue
 
-                if normalized in VIEW_COMMANDS_NORMALIZED:
-                    reply_current_schedule(reply_token, user_id)
-                    continue
-
-                pending_job = get_pending_schedule_job(user_id)
-                if pending_job:
-                    line_reply_text(reply_token, [SCHEDULE_BUSY_REPLY])
-                    continue
-
                 minutes_before = ensure_user_state(user_id).get("minutes_before", DEFAULT_MINUTES_BEFORE)
-                job_id = str(uuid.uuid4())
-                job = {
-                    "id": job_id,
-                    "type": "text",
-                    "payload": text,
-                    "minutes_before": minutes_before,
-                    "reply_token": reply_token,
-                    "created_at": time.time(),
-                    "cancelled": False,
-                }
-                set_pending_schedule_job(user_id, job)
-                start_schedule_job_thread(user_id, job_id)
+                line_reply_text(reply_token, ["入力を受けつけました。しばらくお待ちください。"])
+                background_tasks.add_task(process_timetable_async, user_id, text, minutes_before)
                 continue
 
             if msg_type == "image":
@@ -1814,30 +1596,16 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                 if not message_id:
                     line_reply_text(reply_token, ["画像IDを取得できませんでした。"])
                     continue
-                pending_job = get_pending_schedule_job(user_id)
-                if pending_job:
-                    line_reply_text(reply_token, [SCHEDULE_BUSY_REPLY])
-                    continue
                 minutes_before = ensure_user_state(user_id).get("minutes_before", DEFAULT_MINUTES_BEFORE)
-                job_id = str(uuid.uuid4())
-                job = {
-                    "id": job_id,
-                    "type": "image",
-                    "message_id": message_id,
-                    "minutes_before": minutes_before,
-                    "reply_token": reply_token,
-                    "created_at": time.time(),
-                    "cancelled": False,
-                }
-                set_pending_schedule_job(user_id, job)
-                start_schedule_job_thread(user_id, job_id)
+                line_reply_text(reply_token, ["画像を受け付けました。解析完了後は「一覧」と送信して登録内容をご確認ください。少々お待ちください。"])
+                background_tasks.add_task(process_image_timetable_async, user_id, message_id, minutes_before)
                 continue
         elif etype == "follow" and user_id:
             try:
-                line_push_text(user_id, "友だち追加ありがとうございます。時間割のテキストまたは画像を送ってください。時間割のテキストは多少ラフでも対応できます。例: 月1限 解析学 / 火2限 英語演習")
+                line_push_text(user_id, "友だち追加ありがとうございます。時間割のテキストまたは画像を送ってください。時間割のテキストはかなり適当でも拾うようになっているので適当で大丈夫です。例: 月1限 解析学 / 火2限 英語演習\n使い方は「ヘルプ」で参照ください。")
                 line_push_text(user_id, HELP_TEXT)
             except Exception as e:
-                print(f"Followメッセージ送信失敗: {e}")
+                print(f"初回メッセージ送信失敗: {e}")
 
     return {"status": "ok"}
 
@@ -1847,8 +1615,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Timetable bot management utilities")
     parser.add_argument("--broadcast", type=str, help="全ユーザーへ送信するメッセージ")
-    parser.add_argument("--list-users", action="store_true", help="登録済みユーザーIDの一覧を表示")
-    parser.add_argument("--no-delay", action="store_true", help="ブロードキャスト時の待機をなくす")
+    parser.add_argument("--list-users", action="store_true", help="登録済みユーザーIDを一覧表示")
+    parser.add_argument("--no-delay", action="store_true", help="ブロードキャスト時のインターバルを省略")
     args = parser.parse_args()
 
     if args.list_users or args.broadcast:
@@ -1857,7 +1625,7 @@ if __name__ == "__main__":
     if args.list_users:
         ids = get_all_user_ids(force_db=True)
         if not ids:
-            print("ユーザーは登録されていません。")
+            print("ユーザーが登録されていません。")
         else:
             print("登録ユーザーID:")
             for uid in ids:
