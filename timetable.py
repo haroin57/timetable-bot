@@ -70,6 +70,7 @@ DEFAULT_PERIOD_MAP = {
 
 DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 DEFAULT_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5-mini")
+REPLY_TOKEN_MAX_AGE = int(os.getenv("REPLY_TOKEN_MAX_AGE", "45"))
 
 VIEW_COMMANDS = {"一覧", "確認", "時間割", "schedule", "list"}
 VIEW_COMMANDS_NORMALIZED = {cmd.lower() for cmd in VIEW_COMMANDS}
@@ -1449,22 +1450,33 @@ def finalize_schedule_job_reply(user_id: str, job_id: str, result: str):
     if not job or job.get("id") != job_id:
         return
     reply_token = job.get("reply_token")
+    created_at = job.get("created_at") or 0
     clear_pending_schedule_job(user_id)
-    if not reply_token:
-        return
     if result == "cancelled":
         msg = SCHEDULE_CANCEL_REPLY
     elif result == "success":
         msg = SCHEDULE_SUCCESS_REPLY
     else:
         msg = SCHEDULE_FAILURE_REPLY
-    if not line_reply_text(reply_token, [msg]):
+    should_reply = False
+    if reply_token:
+        age = time.time() - created_at if created_at else 0
+        if not created_at or age <= REPLY_TOKEN_MAX_AGE:
+            should_reply = True
+        else:
+            print(
+                f"[schedule reply fallback] reply token too old ({age:.1f}s), using push for user={user_id}",
+                flush=True,
+            )
+    if should_reply and line_reply_text(reply_token, [msg]):
+        return
+    if should_reply:
         print(f"[schedule reply fallback] reply token invalid for user={user_id}, falling back to push", flush=True)
-        try:
-            if not line_push_text(user_id, msg):
-                print(f"[schedule reply fallback] push failed for user={user_id}", flush=True)
-        except Exception as exc:
-            print(f"[schedule reply fallback] exception user={user_id}: {exc}", flush=True)
+    try:
+        if not line_push_text(user_id, msg):
+            print(f"[schedule reply fallback] push failed for user={user_id}", flush=True)
+    except Exception as exc:
+        print(f"[schedule reply fallback] exception user={user_id}: {exc}", flush=True)
 
 
 def run_schedule_job(user_id: str, job_id: str):
@@ -1669,7 +1681,6 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     if not handler:
                         line_reply_text(reply_token, ["この操作は実行できません。もう一度コマンドを送信してください。"])
                         continue
-                    line_reply_text(reply_token, ["内容を受け付けました。完了後は『一覧』で確認してください。"])
                     handler(user_id, text)
                     continue
 
@@ -1703,7 +1714,6 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     if not detail:
                         request_command_details(reply_token, user_id, "time")
                         continue
-                    line_reply_text(reply_token, ["内容を送信しました。確認メッセージをお待ちください。"])
                     background_tasks.add_task(prepare_time_action, user_id, detail)
                     continue
 
@@ -1722,7 +1732,6 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     if not detail:
                         request_command_details(reply_token, user_id, "add")
                         continue
-                    line_reply_text(reply_token, ["内容を受け付けました。登録完了までお待ち下さい。登録内容を確認する場合は「一覧」と送信して確認してください。"])
                     background_tasks.add_task(prepare_add_action, user_id, detail)
                     continue
 
@@ -1741,7 +1750,6 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     if not detail:
                         request_command_details(reply_token, user_id, "delete")
                         continue
-                    line_reply_text(reply_token, ["内容を受け付けました。登録完了までお待ち下さい。登録内容を確認する場合は「一覧」と送信して確認してください。"])
                     background_tasks.add_task(prepare_delete_action, user_id, detail)
                     continue
 
@@ -1760,7 +1768,6 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     if not detail:
                         request_command_details(reply_token, user_id, "replace")
                         continue
-                    line_reply_text(reply_token, ["内容を受け付けました。完了後は「一覧」で確認してください。"])
                     background_tasks.add_task(prepare_replace_action, user_id, detail)
                     continue
 
