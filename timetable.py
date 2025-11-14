@@ -588,14 +588,17 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_M
 ---
 """.strip()
 
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    log_openai_request("schedule_text", messages)
     client = OpenAI()
     resp = client.chat.completions.create(
         model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+        messages=messages,
     )
+    log_openai_response("schedule_text", resp)
     content = resp.choices[0].message.content
     print(content)  # Debug log
     if isinstance(content, list):
@@ -653,20 +656,23 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
 }}
 """.strip()
 
+    messages = [
+        {"role": "system", "content": system},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": user_text},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        },
+    ]
+    log_openai_request("schedule_image", messages)
     client = OpenAI()
     resp = client.chat.completions.create(
         model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": user_text},
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                ],
-            },
-        ],
+        messages=messages,
     )
+    log_openai_response("schedule_image", resp)
     content = resp.choices[0].message.content
 
     print("[vision raw content]", content, flush=True)  # Debug log
@@ -728,14 +734,17 @@ def call_chatgpt_to_extract_replacement(text: str, model=DEFAULT_OPENAI_MODEL, t
 }
 """.strip()
 
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    log_openai_request("replace", messages)
     client = OpenAI()
     resp = client.chat.completions.create(
         model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+        messages=messages,
     )
+    log_openai_response("replace", resp)
     content = resp.choices[0].message.content
     if isinstance(content, list):
         content = "\n".join(part.get("text", "") for part in content if isinstance(part, dict))
@@ -779,14 +788,17 @@ def call_chatgpt_to_extract_location_updates(text: str, model=DEFAULT_OPENAI_MOD
 }}
 """.strip()
 
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    log_openai_request("location", messages)
     client = OpenAI()
     resp = client.chat.completions.create(
         model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+        messages=messages,
     )
+    log_openai_response("location", resp)
     content = resp.choices[0].message.content
     if isinstance(content, list):
         content = "\n".join(part.get("text", "") for part in content if isinstance(part, dict))
@@ -835,14 +847,17 @@ def call_chatgpt_to_extract_time_updates(text: str, model=DEFAULT_OPENAI_MODEL, 
 }}
 """.strip()
 
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    log_openai_request("time", messages)
     client = OpenAI()
     resp = client.chat.completions.create(
         model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+        messages=messages,
     )
+    log_openai_response("time", resp)
     log_openai_response("time", resp)
     content = resp.choices[0].message.content
     if isinstance(content, list):
@@ -903,11 +918,76 @@ def verify_signature(body: bytes, signature: str) -> bool:
     expected = base64.b64encode(mac).decode("utf-8")
     return hmac.compare_digest(expected, signature or "")
 
+def _shorten_for_log(value: str, limit: int = 400) -> str:
+    if value is None:
+        return ""
+    s = str(value).replace("\r", "\\r").replace("\n", "\\n")
+    return s if len(s) <= limit else s[:limit] + "...(truncated)"
+
+
+def _message_content_to_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") == "text":
+                    parts.append(part.get("text", ""))
+                elif part.get("type") == "image_url":
+                    image_url = part.get("image_url") or {}
+                    parts.append(f"[image:{image_url.get('url', '')}]")
+                else:
+                    parts.append(str(part))
+            else:
+                parts.append(str(part))
+        return "\n".join(parts)
+    return str(content or "")
+
+
+def log_openai_request(label: str, messages: list[dict]):
+    try:
+        formatted = []
+        for msg in messages or []:
+            role = msg.get("role")
+            content = _message_content_to_text(msg.get("content"))
+            formatted.append(f"{role}:{_shorten_for_log(content)}")
+        print(f"[openai request] {label}: {' || '.join(formatted)}", flush=True)
+    except Exception as exc:
+        print(f"[openai request log error] {label}: {exc}", flush=True)
+
+
+def log_openai_response(label: str, resp):
+    try:
+        choice = resp.choices[0] if getattr(resp, "choices", None) else None
+        message = getattr(choice, "message", None)
+        raw_content = getattr(message, "content", None) if message else None
+        text_for_log = _shorten_for_log(_message_content_to_text(raw_content))
+        resp_id = getattr(resp, "id", None)
+        model_name = getattr(resp, "model", None)
+        usage = getattr(resp, "usage", None)
+        usage_dict = None
+        if usage is not None:
+            if hasattr(usage, "model_dump"):
+                usage_dict = usage.model_dump()
+            elif hasattr(usage, "to_dict"):
+                usage_dict = usage.to_dict()
+            elif isinstance(usage, dict):
+                usage_dict = usage
+            else:
+                usage_dict = str(usage)
+        print(f"[openai response] {label}: {text_for_log}", flush=True)
+        print(f"[openai meta] {label}: id={resp_id} model={model_name} usage={usage_dict}", flush=True)
+    except Exception as exc:
+        print(f"[openai response log error] {label}: {exc}", flush=True)
+
+
 def line_push_text(to_user_id: str, text: str):
     if not LINE_TOKEN:
         raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が未設定です。")
     headers = {"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"}
     body = {"to": to_user_id, "messages": [{"type": "text", "text": text[:2000]}]}
+    print(f"[line push] to={to_user_id} text={_shorten_for_log(text)}", flush=True)
     r = requests.post(LINE_PUSH_URL, headers=headers, data=json.dumps(body), timeout=15)
     if r.status_code >= 300:
         raise RuntimeError(f"LINE Push失敗: {r.status_code} {r.text}")
@@ -916,7 +996,9 @@ def line_reply_text(reply_token: str, texts):
     if not LINE_TOKEN:
         raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が未設定です。")
     headers = {"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"}
-    msgs = [{"type": "text", "text": str(t)[:2000]} for t in (texts if isinstance(texts, list) else [texts])]
+    normalized = [str(t) for t in (texts if isinstance(texts, list) else [texts])]
+    print(f"[line reply] token={reply_token} texts={_shorten_for_log(' | '.join(normalized))}", flush=True)
+    msgs = [{"type": "text", "text": t[:2000]} for t in normalized]
     body = {"replyToken": reply_token, "messages": msgs}
     r = requests.post(LINE_REPLY_URL, headers=headers, data=json.dumps(body), timeout=15)
     if r.status_code >= 300:
@@ -1499,6 +1581,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
 
             if msg_type == "text":
                 text = message.get("text", "").strip()
+                print(f"[callback text] user={user_id} text={_shorten_for_log(text)}", flush=True)
                 state = ensure_user_state(user_id)
                 pending_action = state.get("pending_action")
                 pending_command = state.get("pending_command")
@@ -1593,6 +1676,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
 
             if msg_type == "image":
                 message_id = message.get("id")
+                print(f"[callback image] user={user_id} message_id={message_id}", flush=True)
                 if not message_id:
                     line_reply_text(reply_token, ["画像IDを取得できませんでした。"])
                     continue
