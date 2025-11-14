@@ -1009,7 +1009,39 @@ def download_line_content(message_id: str) -> tuple[bytes, str]:
     if r.status_code >= 300:
         raise RuntimeError(f"LINE Content取得失敗: {r.status_code} {r.text}")
     mime = r.headers.get("Content-Type", "application/octet-stream")
+
     return r.content, mime
+
+
+
+def send_reply_or_push(user_id: str, reply_token: str | None, created_at: float | None, texts) -> None:
+    messages = texts if isinstance(texts, list) else [texts]
+    if not messages:
+        return
+
+    should_reply = False
+    if reply_token:
+        age = time.time() - created_at if created_at else 0
+        if not created_at or age <= REPLY_TOKEN_MAX_AGE:
+            should_reply = True
+        else:
+            print(
+                f"[schedule reply fallback] reply token too old ({age:.1f}s), using push for user={user_id}",
+                flush=True,
+            )
+
+    if should_reply and line_reply_text(reply_token, messages):
+        return
+    if should_reply:
+        print(f"[schedule reply fallback] reply token invalid for user={user_id}, falling back to push", flush=True)
+
+    text_msg = "\n".join(str(m) for m in messages)
+    try:
+        if not line_push_text(user_id, text_msg):
+            print(f"[schedule reply fallback] push failed for user={user_id}", flush=True)
+    except Exception as exc:
+        print(f"[schedule reply fallback] exception user={user_id}: {exc}", flush=True)
+
 
 # 既存のschedule_jobs_for_userがなければ以下の関数で差し替え
 def schedule_jobs_for_user(user_id: str, schedule_data: dict, minutes_before: int = DEFAULT_MINUTES_BEFORE):
@@ -1458,25 +1490,7 @@ def finalize_schedule_job_reply(user_id: str, job_id: str, result: str):
         msg = SCHEDULE_SUCCESS_REPLY
     else:
         msg = SCHEDULE_FAILURE_REPLY
-    should_reply = False
-    if reply_token:
-        age = time.time() - created_at if created_at else 0
-        if not created_at or age <= REPLY_TOKEN_MAX_AGE:
-            should_reply = True
-        else:
-            print(
-                f"[schedule reply fallback] reply token too old ({age:.1f}s), using push for user={user_id}",
-                flush=True,
-            )
-    if should_reply and line_reply_text(reply_token, [msg]):
-        return
-    if should_reply:
-        print(f"[schedule reply fallback] reply token invalid for user={user_id}, falling back to push", flush=True)
-    try:
-        if not line_push_text(user_id, msg):
-            print(f"[schedule reply fallback] push failed for user={user_id}", flush=True)
-    except Exception as exc:
-        print(f"[schedule reply fallback] exception user={user_id}: {exc}", flush=True)
+    send_reply_or_push(user_id, reply_token, created_at, [msg])
 
 
 def run_schedule_job(user_id: str, job_id: str):
