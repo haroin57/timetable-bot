@@ -7,7 +7,6 @@ import base64
 import hashlib
 import json
 import threading
-import queue
 import time
 from datetime import datetime, timedelta
 import re
@@ -71,9 +70,9 @@ DEFAULT_PERIOD_MAP = {
 
 DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 DEFAULT_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5-mini")
-SCHEDULE_WORKER_COUNT = int(os.getenv("SCHEDULE_WORKER_COUNT", "3"))
 
 VIEW_COMMANDS = {"一覧", "確認", "時間割", "schedule", "list"}
+VIEW_COMMANDS_NORMALIZED = {cmd.lower() for cmd in VIEW_COMMANDS}
 
 HELP_COMMANDS = {"help", "ヘルプ", "使い方"}
 
@@ -113,9 +112,6 @@ HELP_TEXT = (
 DB_PATH = os.getenv("USER_STATE_DB", os.path.join(os.getcwd(), "user_state.db"))
 DB_CONN: sqlite3.Connection | None = None
 DB_LOCK = threading.Lock()
-
-SCHEDULE_JOB_QUEUE: "queue.Queue[tuple[str, str]]" = queue.Queue()
-SCHEDULE_JOB_THREADS: list[threading.Thread] = []
 
 # ====== ユーティリティ ======
 def normalize_day(day_str: str) -> int:
@@ -599,32 +595,8 @@ def is_schedule_job_cancelled(user_id: str, job_id: str) -> bool:
         return True
     return bool(job.get("cancelled"))
 
-def enqueue_schedule_job(user_id: str, job_id: str):
-    SCHEDULE_JOB_QUEUE.put((user_id, job_id))
-
-
-def _schedule_job_worker():
-    while True:
-        user_id, job_id = SCHEDULE_JOB_QUEUE.get()
-        try:
-            try:
-                run_schedule_job(user_id, job_id)
-            except Exception as exc:
-                print(f"[schedule worker error] user={user_id} job={job_id} error={exc}", flush=True)
-        finally:
-            SCHEDULE_JOB_QUEUE.task_done()
-
-
-def start_schedule_job_workers(count: int = SCHEDULE_WORKER_COUNT):
-    if count <= 0:
-        count = 1
-    if len(SCHEDULE_JOB_THREADS) >= count:
-        return
-    needed = count - len(SCHEDULE_JOB_THREADS)
-    for _ in range(needed):
-        th = threading.Thread(target=_schedule_job_worker, daemon=True)
-        th.start()
-        SCHEDULE_JOB_THREADS.append(th)
+def start_schedule_job_thread(user_id: str, job_id: str):
+    threading.Thread(target=run_schedule_job, args=(user_id, job_id), daemon=True).start()
 
 
 COMMAND_GUIDANCE = {
@@ -1175,6 +1147,22 @@ def summarize_schedule(schedule_data: dict, limit: int = 20) -> str:
     return "\n".join(rows) if rows else "登録件数 0 件"
 
 
+
+def reply_current_schedule(reply_token: str, user_id: str):
+    state = ensure_user_state(user_id)
+    schedule_data = state.get("schedule") or _empty_schedule()
+    entries = schedule_data.get("schedule", [])
+    pending_job = get_pending_schedule_job(user_id)
+    if not entries:
+        msg = "まだ時間割が登録されていません。テキストか画像で送信すると解析できます。"
+    else:
+        minutes_before = state.get("minutes_before", DEFAULT_MINUTES_BEFORE)
+        summary = summarize_schedule(schedule_data, limit=50)
+        msg = f"登録済みの時間割は以下のとおりです。\n通知: {minutes_before}分前\n{summary}"
+        if pending_job:
+            msg += "\n（現在解析中の内容が反映されるまで少し時間がかかる場合があります）"
+    line_reply_text(reply_token, [msg])
+
 def broadcast_message(text: str, delay: float = 0.1, reload_state: bool = True):
     msg = (text or "").strip()
     if not msg:
@@ -1622,8 +1610,6 @@ def _on_startup():
     th = threading.Thread(target=_scheduler_loop, daemon=True)
     th.start()
     print("Scheduler thread started.")
-    start_schedule_job_workers(SCHEDULE_WORKER_COUNT)
-    print(f"Schedule job workers started: {len(SCHEDULE_JOB_THREADS)}")
 
 @app.get("/", response_class=PlainTextResponse)
 def health():
@@ -1778,6 +1764,10 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     background_tasks.add_task(prepare_replace_action, user_id, detail)
                     continue
 
+                if normalized in VIEW_COMMANDS_NORMALIZED:
+                    reply_current_schedule(reply_token, user_id)
+                    continue
+
                 pending_job = get_pending_schedule_job(user_id)
                 if pending_job:
                     line_reply_text(reply_token, [SCHEDULE_BUSY_REPLY])
@@ -1795,7 +1785,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     "cancelled": False,
                 }
                 set_pending_schedule_job(user_id, job)
-                enqueue_schedule_job(user_id, job_id)
+                start_schedule_job_thread(user_id, job_id)
                 continue
 
             if msg_type == "image":
@@ -1819,7 +1809,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     "cancelled": False,
                 }
                 set_pending_schedule_job(user_id, job)
-                enqueue_schedule_job(user_id, job_id)
+                start_schedule_job_thread(user_id, job_id)
                 continue
         elif etype == "follow" and user_id:
             try:
