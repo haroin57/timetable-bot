@@ -1544,7 +1544,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     if not detail:
                         request_command_details(reply_token, user_id, "add")
                         continue
-                    line_reply_text(reply_token, ["内容を受け付けました。解析完了後は「一覧」と送信して確認してください。少々お待ちください。"])
+                    line_reply_text(reply_token, ["内容を受け付けました。登録完了までお待ち下さい。登録内容を確認する場合は「一覧」と送信して確認してください。"])
                     background_tasks.add_task(prepare_add_action, user_id, detail)
                     continue
 
@@ -1563,7 +1563,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     if not detail:
                         request_command_details(reply_token, user_id, "delete")
                         continue
-                    line_reply_text(reply_token, ["内容を受け付けました。解析完了後は「一覧」で確認できます。少々お待ちください。"])
+                    line_reply_text(reply_token, ["内容を受け付けました。登録完了までお待ち下さい。登録内容を確認する場合は「一覧」と送信して確認してください。"])
                     background_tasks.add_task(prepare_delete_action, user_id, detail)
                     continue
 
