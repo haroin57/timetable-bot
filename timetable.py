@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dotenv import load_dotenv; load_dotenv()
 import os
@@ -1318,10 +1318,13 @@ def process_timetable_async(user_id: str, text: str, minutes_before: int):
     if not schedule_data or not schedule_data.get("schedule"):
         schedule_data = parse_timetable_locally(text, timezone="Asia/Tokyo")
         if not schedule_data.get("schedule"):
-            line_push_text(user_id, f"時間割の解析に失敗しました。{err or ''}".strip())
+            detail = (str(err).strip() if err else "")
+            if detail:
+                print(f"[schedule parse error] user={user_id} detail={detail}", flush=True)
+            line_push_text(user_id, "時間割の解析に失敗しました。もう一度お試しください。")
             return
         else:
-            line_push_text(user_id, "OpenAIの解析結果から授業を取得できなかったため、簡易解析で登録します。")
+            print(f"[schedule fallback parser] user={user_id}", flush=True)
     print(f"user_id={user_id}")
 
     # 2) スケジュール登録
@@ -1359,8 +1362,7 @@ def process_image_timetable_async(user_id: str, message_id: str, minutes_before:
 
     if not schedule_data or not schedule_data.get("schedule"):
         detail = str(err).strip() if err else "OpenAIの応答から授業が見つかりませんでした。"
-        message = f"画像から時間割を抽出できませんでした。{detail}".strip()
-        line_push_text(user_id, message)
+        line_push_text(user_id, "時間割の解析に失敗しました。もう一度お試しください。")
         try:
             raw_preview = json.dumps(schedule_data, ensure_ascii=False)[:500] if schedule_data else "None"
         except Exception:
@@ -1536,9 +1538,31 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
 
                 if pending_action:
                     if normalized in CONFIRM_POSITIVE_NORMALIZED:
-                                            line_reply_text(reply_token, ["内容を送信しました。確認メッセージをお待ちください。"])
-                    background_tasks.add_task(prepare_location_action, user_id, detail)
+                        line_reply_text(reply_token, ["了解しました。実行します。"])
+                        execute_pending_action(user_id)
+                    elif normalized in CONFIRM_NEGATIVE_NORMALIZED:
+                        if cancel_pending_action(user_id):
+                            line_reply_text(reply_token, ["キャンセルしました。"])
+                        else:
+                            line_reply_text(reply_token, ["キャンセルできる操作はありません。"])
+                    else:
+                        line_reply_text(reply_token, ["『はい』または『いいえ』で返信してください。"])
                     continue
+
+                if pending_command:
+                    if normalized in CONFIRM_NEGATIVE_NORMALIZED:
+                        clear_pending_command(user_id)
+                        line_reply_text(reply_token, ["キャンセルしました。"])
+                        continue
+                    handler = COMMAND_PREPARE.get(pending_command)
+                    clear_pending_command(user_id)
+                    if not handler:
+                        line_reply_text(reply_token, ["この操作は実行できません。もう一度コマンドを送信してください。"])
+                        continue
+                    line_reply_text(reply_token, ["内容を受け付けました。完了後は「一覧」で確認してください。"])
+                    background_tasks.add_task(handler, user_id, text)
+                    continue
+
 
                 if text in TIME_COMMANDS:
                     request_command_details(reply_token, user_id, "time")
@@ -1617,7 +1641,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     continue
 
                 minutes_before = ensure_user_state(user_id).get("minutes_before", DEFAULT_MINUTES_BEFORE)
-                line_reply_text(reply_token, ["入力を受けつけました。しばらくお待ちください。"])
+                line_reply_text(reply_token, ["時間割を受け付けました。解析が完了したら「一覧」と送信して登録内容をご確認ください。少々お待ちください。"])
                 background_tasks.add_task(process_timetable_async, user_id, text, minutes_before)
                 continue
 
@@ -1627,7 +1651,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     line_reply_text(reply_token, ["画像IDを取得できませんでした。"])
                     continue
                 minutes_before = ensure_user_state(user_id).get("minutes_before", DEFAULT_MINUTES_BEFORE)
-                line_reply_text(reply_token, ["画像を受け付けました。解析完了後は「一覧」と送信して登録内容をご確認ください。少々お待ちください。"])
+                line_reply_text(reply_token, ["時間割を受け付けました。解析が完了したら「一覧」と送信して登録内容をご確認ください。少々お待ちください。"])
                 background_tasks.add_task(process_image_timetable_async, user_id, message_id, minutes_before)
                 continue
         elif etype == "follow" and user_id:
