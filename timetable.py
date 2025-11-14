@@ -1193,8 +1193,9 @@ def merge_additions(base: dict, additions: dict) -> dict:
     return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": out}
 
 def summarize_and_push(user_id: str, minutes_before: int, schedule_data: dict, prefix: str):
-    msg = f"{prefix}\n通知: {minutes_before}分前\n" + summarize_schedule(schedule_data)
-    line_push_text(user_id, msg)
+    summary_text = summarize_schedule(schedule_data)
+    log_msg = f"[summary] user={user_id} minutes_before={minutes_before}\n{prefix}\n{summary_text}"
+    print(log_msg, flush=True)
 
 
 def finalize_action(user_id: str, new_sched: dict, minutes_before: int, prefix: str):
@@ -1543,7 +1544,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     if not detail:
                         request_command_details(reply_token, user_id, "add")
                         continue
-                    line_reply_text(reply_token, ["内容を解析しています。確認メッセージをお待ちください。"])
+                    line_reply_text(reply_token, ["内容を受け付けました。解析完了後は「一覧」と送信して確認してください。少々お待ちください。"])
                     background_tasks.add_task(prepare_add_action, user_id, detail)
                     continue
 
@@ -1562,7 +1563,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     if not detail:
                         request_command_details(reply_token, user_id, "delete")
                         continue
-                    line_reply_text(reply_token, ["内容を解析しています。確認メッセージをお待ちください。"])
+                    line_reply_text(reply_token, ["内容を受け付けました。解析完了後は「一覧」で確認できます。少々お待ちください。"])
                     background_tasks.add_task(prepare_delete_action, user_id, detail)
                     continue
 
@@ -1581,7 +1582,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     if not detail:
                         request_command_details(reply_token, user_id, "replace")
                         continue
-                    line_reply_text(reply_token, ["内容を解析しています。確認メッセージをお待ちください。"])
+                    line_reply_text(reply_token, ["内容を受け付けました。解析完了後は「一覧」で確認できます。少々お待ちください。"])
                     background_tasks.add_task(prepare_replace_action, user_id, detail)
                     continue
 
@@ -1596,7 +1597,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     line_reply_text(reply_token, ["画像IDを取得できませんでした。"])
                     continue
                 minutes_before = ensure_user_state(user_id).get("minutes_before", DEFAULT_MINUTES_BEFORE)
-                line_reply_text(reply_token, ["画像を受け付けました。解析後に時間割をお送りします。"])
+                line_reply_text(reply_token, ["画像を受け付けました。解析完了後は「一覧」と送信して登録内容をご確認ください。少々お待ちください。"])
                 background_tasks.add_task(process_image_timetable_async, user_id, message_id, minutes_before)
                 continue
         elif etype == "follow" and user_id:
