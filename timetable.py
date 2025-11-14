@@ -134,13 +134,14 @@ def compute_notify_slot(day_idx: int, start_hm: str, offset_min: int):
 
 def extract_json_from_text(text: str) -> str:
     decoder = json.JSONDecoder()
-    idx = text.find("{")
-    while idx != -1:
-        try:
-            obj, end = decoder.raw_decode(text[idx:])
-            return json.dumps(obj, ensure_ascii=False)
-        except json.JSONDecodeError:
-            idx = text.find("{", idx + 1)
+    for token in ("{", "["):
+        idx = text.find(token)
+        while idx != -1:
+            try:
+                obj, end = decoder.raw_decode(text[idx:])
+                return json.dumps(obj, ensure_ascii=False)
+            except json.JSONDecodeError:
+                idx = text.find(token, idx + 1)
     raise ValueError("LINEのメッセージの返信はできませんので、ご了承ください。操作方法の確認の際は「ヘルプ」と送信してください。")
 
 def normalize_schedule_response(data, timezone="Asia/Tokyo"):
