@@ -22,6 +22,30 @@ try:
 except ImportError:
     OpenAI = None
 
+
+def log_openai_response(label: str, resp):
+    try:
+        resp_id = getattr(resp, "id", None)
+        model = getattr(resp, "model", None)
+        usage = getattr(resp, "usage", None)
+        if hasattr(usage, "model_dump"):
+            usage_dict = usage.model_dump()
+        else:
+            usage_dict = usage
+        choice = resp.choices[0] if getattr(resp, "choices", None) else None
+        finish_reason = getattr(choice, "finish_reason", None) if choice else None
+        message = getattr(choice, "message", None) if choice else None
+        content = getattr(message, "content", None) if message else None
+        role = getattr(message, "role", None) if message else None
+    except Exception as exc:
+        print(f"[OpenAI {label} log failure] {exc}", flush=True)
+        return
+    print(f"[OpenAI {label}] id={resp_id} model={model} finish={finish_reason} usage={usage_dict}", flush=True)
+    if role is not None:
+        print(f"[OpenAI {label} role] {role}", flush=True)
+    if content is not None:
+        print(f"[OpenAI {label} content] {content}", flush=True)
+
 # ====== 設定 ======
 DEFAULT_MINUTES_BEFORE = int(os.getenv("DEFAULT_MINUTES_BEFORE", "10"))
 
@@ -908,9 +932,15 @@ def line_push_text(to_user_id: str, text: str):
         raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が未設定です。")
     headers = {"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"}
     body = {"to": to_user_id, "messages": [{"type": "text", "text": text[:2000]}]}
-    r = requests.post(LINE_PUSH_URL, headers=headers, data=json.dumps(body), timeout=15)
+    try:
+        r = requests.post(LINE_PUSH_URL, headers=headers, data=json.dumps(body), timeout=15)
+    except Exception as exc:
+        print(f"[line push error] user={to_user_id} error={exc}", flush=True)
+        return False
     if r.status_code >= 300:
-        raise RuntimeError(f"LINE Push失敗: {r.status_code} {r.text}")
+        print(f"[line push error] user={to_user_id} status={r.status_code} body={r.text}", flush=True)
+        return False
+    return True
 
 def line_reply_text(reply_token: str, texts):
     if not LINE_TOKEN:
