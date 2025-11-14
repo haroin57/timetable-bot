@@ -22,29 +22,6 @@ try:
 except ImportError:
     OpenAI = None
 
-def log_openai_response(label: str, resp):
-    try:
-        resp_id = getattr(resp, "id", None)
-        model = getattr(resp, "model", None)
-        usage = getattr(resp, "usage", None)
-        if hasattr(usage, "model_dump"):
-            usage_dict = usage.model_dump()
-        else:
-            usage_dict = usage
-        choice = resp.choices[0] if getattr(resp, "choices", None) else None
-        finish_reason = getattr(choice, "finish_reason", None) if choice else None
-        message = getattr(choice, "message", None) if choice else None
-        content = getattr(message, "content", None) if message else None
-        role = getattr(message, "role", None) if message else None
-    except Exception as log_exc:
-        print(f"[OpenAI {label} log failure] {log_exc}", flush=True)
-        return
-    print(f"[OpenAI {label}] id={resp_id} model={model} finish={finish_reason} usage={usage_dict}", flush=True)
-    if role is not None:
-        print(f"[OpenAI {label} role] {role}", flush=True)
-    if content is not None:
-        print(f"[OpenAI {label} content] {content}", flush=True)
-
 # ====== 設定 ======
 DEFAULT_MINUTES_BEFORE = int(os.getenv("DEFAULT_MINUTES_BEFORE", "10"))
 
@@ -89,15 +66,15 @@ HELP_TEXT = (
 
     "利用できる主なコマンド：\n"
 
-    "・通知 10 … 通知タイミングを分単位で設定\n"
+    "・通知 10\n通知タイミングを分単位で設定\n"
 
-    "・追加 / 削除 / 置換 / 教室 … キーワードだけ送信すると詳細入力モードになります。\n"
-    "  続けて授業名や時間を自由な文章で送ると GPT が解釈し、実行前に確認メッセージが届きます。\n"
-    "  直接「追加 月曜1限 解析学」などと書いても同じ処理を行います。\n"
+    "・追加 / 削除 / 置換 / 教室\nキーワードだけ送信すると詳細入力モードになります。\n"
+    "続けて授業名や時間を自由な文章で送ると GPT が解釈し、実行前に確認メッセージが届きます。\n"
+    "直接「追加 月曜1限 解析学」などと書いても同じ処理を行います。\n"
 
-    "・リセット … 登録済みの時間割をすべて削除\n"
+    "・リセット\n登録済みの時間割をすべて削除\n"
 
-    "・一覧 … 現在登録済みの時間割を表示\n"
+    "・一覧\n現在登録済みの時間割を表示\n"
 
     "・各コマンド実行前には確認メッセージ（はい/いいえ）が届きます\n"
 
@@ -134,17 +111,13 @@ def compute_notify_slot(day_idx: int, start_hm: str, offset_min: int):
 
 def extract_json_from_text(text: str) -> str:
     decoder = json.JSONDecoder()
-    idx = 0
-    length = len(text)
-    while idx < length:
-        ch = text[idx]
-        if ch in "{[":
-            try:
-                obj, end = decoder.raw_decode(text[idx:])
-                return json.dumps(obj, ensure_ascii=False)
-            except json.JSONDecodeError:
-                pass
-        idx += 1
+    idx = text.find("{")
+    while idx != -1:
+        try:
+            obj, end = decoder.raw_decode(text[idx:])
+            return json.dumps(obj, ensure_ascii=False)
+        except json.JSONDecodeError:
+            idx = text.find("{", idx + 1)
     raise ValueError("LINEのメッセージの返信はできませんので、ご了承ください。操作方法の確認の際は「ヘルプ」と送信してください。")
 
 def normalize_schedule_response(data, timezone="Asia/Tokyo"):
@@ -474,7 +447,7 @@ def request_command_details(reply_token: str, user_id: str, command_type: str):
     set_pending_command(user_id, command_type)
     line_reply_text(
         reply_token,
-        [f"{guidance}\nキャンセルする場合は『いいえ』または『キャンセル』と送ってください。"],
+        [f"{guidance}\nキャンセルする場合は『いいえ』または『キャンセル』と送fてください。"],
     )
 
 
@@ -521,8 +494,8 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_M
             {"role": "user", "content": user},
         ],
     )
-    log_openai_response("schedule", resp)
     content = resp.choices[0].message.content
+    print(content)  # Debug log
     if isinstance(content, list):
         parts = []
         for part in content:
@@ -533,7 +506,6 @@ def call_chatgpt_to_extract_schedule(timetable_text: str, model=DEFAULT_OPENAI_M
         raise ValueError(f"Unexpected content type: {type(content)}")
 
     raw_json = extract_json_from_text(content)
-    print("[OpenAI schedule extracted JSON]", raw_json, flush=True)
     data = normalize_schedule_response(json.loads(raw_json), timezone=timezone)
     for entry in data["schedule"]:
         entry.setdefault("location", None)
@@ -593,7 +565,6 @@ def call_chatgpt_to_extract_schedule_from_image(image_bytes: bytes, mime_type: s
             },
         ],
     )
-    log_openai_response("vision", resp)
     content = resp.choices[0].message.content
 
     print("[vision raw content]", content, flush=True)  # Debug log
@@ -663,12 +634,10 @@ def call_chatgpt_to_extract_replacement(text: str, model=DEFAULT_OPENAI_MODEL, t
             {"role": "user", "content": user},
         ],
     )
-    log_openai_response("replacement", resp)
     content = resp.choices[0].message.content
     if isinstance(content, list):
         content = "\n".join(part.get("text", "") for part in content if isinstance(part, dict))
     raw_json = extract_json_from_text(content)
-    print("[OpenAI replace extracted JSON]", raw_json, flush=True)
     data = json.loads(raw_json)
     if "old" not in data or "new" not in data:
         raise ValueError("old/new が含まれていない応答でした。")
@@ -716,12 +685,10 @@ def call_chatgpt_to_extract_location_updates(text: str, model=DEFAULT_OPENAI_MOD
             {"role": "user", "content": user},
         ],
     )
-    log_openai_response("location", resp)
     content = resp.choices[0].message.content
     if isinstance(content, list):
         content = "\n".join(part.get("text", "") for part in content if isinstance(part, dict))
     raw_json = extract_json_from_text(content)
-    print("[OpenAI location extracted JSON]", raw_json, flush=True)
     data = json.loads(raw_json)
     data.setdefault("timezone", timezone)
     updates = data.get("updates") or data.get("schedule")
@@ -1141,7 +1108,6 @@ def process_timetable_async(user_id: str, text: str, minutes_before: int):
         )
     except Exception as e:
         err = e
-        print(f"[OpenAI schedule error] {e}", flush=True)
     if not schedule_data or not schedule_data.get("schedule"):
         schedule_data = parse_timetable_locally(text, timezone="Asia/Tokyo")
         if not schedule_data.get("schedule"):
@@ -1183,7 +1149,6 @@ def process_image_timetable_async(user_id: str, message_id: str, minutes_before:
         )
     except Exception as e:
         err = e
-        print(f"[OpenAI image schedule error] {e}", flush=True)
 
     if not schedule_data or not schedule_data.get("schedule"):
         detail = str(err).strip() if err else "OpenAIの応答から授業が見つかりませんでした。"
@@ -1403,7 +1368,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                         sched = state.get("schedule") or {}
                         if sched.get("schedule"):
                             schedule_jobs_for_user(user_id, sched, minutes_before=minutes_before)
-                        line_reply_text(reply_token, [f"通知タイミングを {minutes_before} 分前に設定しました。時間割テキストを送ってください。"])
+                        line_reply_text(reply_token, [f"通知タイミングを {minutes_before} 分前に設定しました。"])
                     except Exception:
                         line_reply_text(reply_token, ["通知 10 の形式で分数を指定してください。"])
                     continue
