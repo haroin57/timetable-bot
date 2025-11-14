@@ -1011,15 +1011,21 @@ def line_push_text(to_user_id: str, text: str):
         return False
     return True
 
-def line_reply_text(reply_token: str, texts):
+def line_reply_text(reply_token: str, texts) -> bool:
     if not LINE_TOKEN:
         raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が未設定です。")
     headers = {"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"}
     msgs = [{"type": "text", "text": str(t)[:2000]} for t in (texts if isinstance(texts, list) else [texts])]
     body = {"replyToken": reply_token, "messages": msgs}
-    r = requests.post(LINE_REPLY_URL, headers=headers, data=json.dumps(body), timeout=15)
+    try:
+        r = requests.post(LINE_REPLY_URL, headers=headers, data=json.dumps(body), timeout=15)
+    except Exception as exc:
+        print(f"LINE Reply送信エラー: {exc}", flush=True)
+        return False
     if r.status_code >= 300:
-        print(f"LINE Reply失敗: {r.status_code} {r.text}")
+        print(f"LINE Reply失敗: {r.status_code} {r.text}", flush=True)
+        return False
+    return True
 
 def download_line_content(message_id: str) -> tuple[bytes, str]:
     if not LINE_TOKEN:
@@ -1464,7 +1470,13 @@ def finalize_schedule_job_reply(user_id: str, job_id: str, result: str):
         msg = SCHEDULE_SUCCESS_REPLY
     else:
         msg = SCHEDULE_FAILURE_REPLY
-    line_reply_text(reply_token, [msg])
+    if not line_reply_text(reply_token, [msg]):
+        print(f"[schedule reply fallback] reply token invalid for user={user_id}, falling back to push", flush=True)
+        try:
+            if not line_push_text(user_id, msg):
+                print(f"[schedule reply fallback] push failed for user={user_id}", flush=True)
+        except Exception as exc:
+            print(f"[schedule reply fallback] exception user={user_id}: {exc}", flush=True)
 
 
 def run_schedule_job(user_id: str, job_id: str):
