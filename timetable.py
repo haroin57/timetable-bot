@@ -47,8 +47,10 @@ DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 DEFAULT_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5-mini")
 
 VIEW_COMMANDS = {"一覧", "確認", "時間割", "schedule", "list"}
+VIEW_COMMANDS_NORMALIZED = {cmd.lower() for cmd in VIEW_COMMANDS}
 
 HELP_COMMANDS = {"help", "ヘルプ", "使い方"}
+HELP_COMMANDS_NORMALIZED = {cmd.lower() for cmd in HELP_COMMANDS}
 
 RESET_COMMANDS = {"リセット", "reset", "クリア", "clear"}
 ADD_COMMANDS = {"追加", "add"}
@@ -60,6 +62,10 @@ CONFIRM_POSITIVE = {"はい", "はい。", "yes", "y", "ok", "了解", "うん",
 CONFIRM_NEGATIVE = {"いいえ", "いいえ。", "no", "n", "やめる", "キャンセル", "不要"}
 CONFIRM_POSITIVE_NORMALIZED = {s.lower() for s in CONFIRM_POSITIVE}
 CONFIRM_NEGATIVE_NORMALIZED = {s.lower() for s in CONFIRM_NEGATIVE}
+
+
+
+MAINTENANCE_MODE_MESSAGE = "現在メンテナンス中です。しばらくお待ちください。"
 
 
 
@@ -970,9 +976,15 @@ def line_reply_text(reply_token: str, texts):
     print(f"[line reply] token={reply_token} texts={_shorten_for_log(' | '.join(normalized))}", flush=True)
     msgs = [{"type": "text", "text": t[:2000]} for t in normalized]
     body = {"replyToken": reply_token, "messages": msgs}
-    r = requests.post(LINE_REPLY_URL, headers=headers, data=json.dumps(body), timeout=15)
+    try:
+        r = requests.post(LINE_REPLY_URL, headers=headers, data=json.dumps(body), timeout=15)
+    except Exception as exc:
+        print(f"LINE Reply送信エラー: {exc}", flush=True)
+        return False
     if r.status_code >= 300:
-        print(f"LINE Reply失敗: {r.status_code} {r.text}")
+        print(f"LINE Reply失敗: {r.status_code} {r.text}", flush=True)
+        return False
+    return True
 
 def download_line_content(message_id: str) -> tuple[bytes, str]:
     if not LINE_TOKEN:
@@ -984,6 +996,15 @@ def download_line_content(message_id: str) -> tuple[bytes, str]:
         raise RuntimeError(f"LINE Content取得失敗: {r.status_code} {r.text}")
     mime = r.headers.get("Content-Type", "application/octet-stream")
     return r.content, mime
+
+def reply_or_push(user_id: str, reply_token: str | None, texts) -> None:
+    payload = texts if isinstance(texts, list) else [texts]
+    if reply_token:
+        if line_reply_text(reply_token, payload):
+            return
+        print(f"[reply fallback] reply failed, falling back to push user={user_id}", flush=True)
+    line_push_text(user_id, "\n".join(str(t) for t in payload))
+
 
 # 既存のschedule_jobs_for_userがなければ以下の関数で差し替え
 def schedule_jobs_for_user(user_id: str, schedule_data: dict, minutes_before: int = DEFAULT_MINUTES_BEFORE):
@@ -1244,20 +1265,50 @@ def merge_additions(base: dict, additions: dict) -> dict:
             keyset.add(k)
     return {"timezone": base.get("timezone", "Asia/Tokyo"), "schedule": out}
 
-def summarize_and_push(user_id: str, minutes_before: int, schedule_data: dict, prefix: str):
+def summarize_and_push(
+    user_id: str,
+    minutes_before: int,
+    schedule_data: dict,
+    prefix: str,
+    reply_token: str | None = None,
+):
     summary_text = summarize_schedule(schedule_data)
     log_msg = f"[summary] user={user_id} minutes_before={minutes_before}\n{prefix}\n{summary_text}"
     print(log_msg, flush=True)
+    message = f"{prefix}\n{summary_text}" if prefix else summary_text
+    reply_or_push(user_id, reply_token, message)
 
 
-def finalize_action(user_id: str, new_sched: dict, minutes_before: int, prefix: str):
+def reply_with_schedule_overview(
+    user_id: str, reply_token: str | None, header: str = "���݂̃��X�g�ł�B"
+):
+    state = ensure_user_state(user_id)
+    schedule_data = ensure_schedule_dict(state.get("schedule"))
+    summary_text = summarize_schedule(schedule_data)
+    message = f"{header}\n{summary_text}" if header else summary_text
+    reply_or_push(user_id, reply_token, message)
+    print(f"[view schedule] user={user_id} entries={len(schedule_data.get('schedule', []))}", flush=True)
+
+
+def reply_with_help(user_id: str, reply_token: str | None):
+    reply_or_push(user_id, reply_token, HELP_TEXT)
+    print(f"[help] user={user_id}", flush=True)
+
+
+def finalize_action(
+    user_id: str,
+    new_sched: dict,
+    minutes_before: int,
+    prefix: str,
+    reply_token: str | None = None,
+):
     schedule_jobs_for_user(user_id, new_sched, minutes_before=minutes_before)
     state = ensure_user_state(user_id)
     state["minutes_before"] = minutes_before
     state["schedule"] = ensure_schedule_dict(new_sched)
     state["updated_at"] = datetime.now()
     persist_user_state(user_id)
-    summarize_and_push(user_id, minutes_before, new_sched, prefix)
+    summarize_and_push(user_id, minutes_before, new_sched, prefix, reply_token=reply_token)
 
 
 def execute_pending_action(user_id: str):
@@ -1327,10 +1378,13 @@ def cancel_pending_action(user_id: str) -> bool:
         return True
     return False
 
-def process_timetable_async(user_id: str, text: str, minutes_before: int):
+def process_timetable_async(
+    user_id: str, text: str, minutes_before: int, reply_token: str | None = None
+):
     # 1) OpenAIで解析->失敗時は簡易パーサー
     schedule_data = None
     err = None
+    fallback_notice = None
     try:
         schedule_data = call_chatgpt_to_extract_schedule(
             text, model=DEFAULT_OPENAI_MODEL, timezone="Asia/Tokyo"
@@ -1341,10 +1395,10 @@ def process_timetable_async(user_id: str, text: str, minutes_before: int):
         log_schedule_fallback("empty_gpt_result", text)
         schedule_data = parse_timetable_locally(text, timezone="Asia/Tokyo")
         if not schedule_data.get("schedule"):
-            line_push_text(user_id, f"時間割の解析に失敗しました。{err or ''}".strip())
+            reply_or_push(user_id, reply_token, f"時間割の解析に失敗しました。{err or ''}".strip())
             return
         else:
-            line_push_text(user_id, "OpenAIの解析結果から授業を取得できなかったため、簡易解析で登録します。")
+            fallback_notice = "OpenAIの解析結果から授業を取得できなかったため、簡易解析で登録します。"
             log_schedule_fallback("local_parser_used", text)
     print(f"[schedule gpt parsed] user={user_id} entries={len(schedule_data.get('schedule', []))}", flush=True)
 
@@ -1357,15 +1411,26 @@ def process_timetable_async(user_id: str, text: str, minutes_before: int):
     state["updated_at"] = datetime.now()
     persist_user_state(user_id)
     # 4) 完了通知 + 内訳
-    summarize_and_push(user_id, minutes_before, schedule_data, "時間割の登録が完了しました。内訳は以下です。誤りがあれば「追加」「削除」「置換」で修正できます。")
+    prefix = "時間割の登録が完了しました。内訳は以下です。誤りがあれば「追加」「削除」「置換」で修正できます。"
+    if fallback_notice:
+        prefix = f"{fallback_notice}\n{prefix}"
+    summarize_and_push(
+        user_id,
+        minutes_before,
+        schedule_data,
+        prefix,
+        reply_token=reply_token,
+    )
 
-def process_image_timetable_async(user_id: str, message_id: str, minutes_before: int):
+def process_image_timetable_async(
+    user_id: str, message_id: str, minutes_before: int, reply_token: str | None = None
+):
 
     try:
         image_bytes, mime_type = download_line_content(message_id)
         print(f"[image] user={user_id} bytes={len(image_bytes)} mime={mime_type}") # Debug log
     except Exception as e:
-        line_push_text(user_id, f"画像のダウンロードに失敗しました: {e}")
+        reply_or_push(user_id, reply_token, f"画像のダウンロードに失敗しました: {e}")
         print(f"[image] download failed: {e}")
         return
 
@@ -1384,7 +1449,7 @@ def process_image_timetable_async(user_id: str, message_id: str, minutes_before:
     if not schedule_data or not schedule_data.get("schedule"):
         detail = str(err).strip() if err else "OpenAIの応答から授業が見つかりませんでした。"
         message = f"画像から時間割を抽出できませんでした。{detail}".strip()
-        line_push_text(user_id, message)
+        reply_or_push(user_id, reply_token, message)
         log_schedule_fallback("image_empty_gpt_result", f"message_id={message_id}")
         try:
             raw_preview = json.dumps(schedule_data, ensure_ascii=False)[:500] if schedule_data else "None"
@@ -1400,7 +1465,13 @@ def process_image_timetable_async(user_id: str, message_id: str, minutes_before:
     state["schedule"] = ensure_schedule_dict(schedule_data)
     state["updated_at"] = datetime.now()
     persist_user_state(user_id)
-    summarize_and_push(user_id, minutes_before, schedule_data, "画像から時間割を登録しました。内訳は以下です。")
+    summarize_and_push(
+        user_id,
+        minutes_before,
+        schedule_data,
+        "画像から時間割を登録しました。内訳は以下です。",
+        reply_token=reply_token,
+    )
 
 
 def prepare_add_action(user_id: str, body: str):
@@ -1561,6 +1632,10 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
             message = ev.get("message", {})
             msg_type = message.get("type")
 
+            if MAINTENANCE_MODE_MESSAGE:
+                reply_or_push(user_id, reply_token, MAINTENANCE_MODE_MESSAGE)
+                continue
+
             if msg_type == "text":
                 text = message.get("text", "").strip()
                 print(f"[callback text] user={user_id} text={_shorten_for_log(text)}", flush=True)
@@ -1568,6 +1643,14 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                 pending_action = state.get("pending_action")
                 pending_command = state.get("pending_command")
                 normalized = text.lower()
+
+                if normalized in VIEW_COMMANDS_NORMALIZED:
+                    reply_with_schedule_overview(user_id, reply_token, "現在登録されている時間割です。")
+                    continue
+
+                if normalized in HELP_COMMANDS_NORMALIZED:
+                    reply_with_help(user_id, reply_token)
+                    continue
 
                 if pending_action:
                     if normalized in CONFIRM_POSITIVE_NORMALIZED:
@@ -1652,19 +1735,18 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
                     continue
 
                 minutes_before = ensure_user_state(user_id).get("minutes_before", DEFAULT_MINUTES_BEFORE)
-                line_reply_text(reply_token, ["入力を受けつけました。しばらくお待ちください。"])
-                background_tasks.add_task(process_timetable_async, user_id, text, minutes_before)
+                background_tasks.add_task(process_timetable_async, user_id, text, minutes_before, reply_token)
                 continue
 
             if msg_type == "image":
                 message_id = message.get("id")
                 print(f"[callback image] user={user_id} message_id={message_id}", flush=True)
                 if not message_id:
-                    line_reply_text(reply_token, ["画像IDを取得できませんでした。"])
+                    reply_or_push(user_id, reply_token, "画像IDを取得できませんでした。")
                     continue
                 minutes_before = ensure_user_state(user_id).get("minutes_before", DEFAULT_MINUTES_BEFORE)
                 line_reply_text(reply_token, ["画像を受け付けました。解析完了後は「一覧」と送信して登録内容をご確認ください。少々お待ちください。"])
-                background_tasks.add_task(process_image_timetable_async, user_id, message_id, minutes_before)
+                background_tasks.add_task(process_image_timetable_async, user_id, message_id, minutes_before, reply_token)
                 continue
         elif etype == "follow" and user_id:
             try:
